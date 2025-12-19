@@ -4,7 +4,12 @@
 
 [![26% Vibe_Coded](https://img.shields.io/badge/26%25-Vibe_Coded-ff69b4?style=for-the-badge&logo=claude&logoColor=white)](https://github.com/trieloff/vibe-coded-badge-action)
 
-Quickly install Claude/Agent skills from another repository. Works standalone and as a `gh` extension.
+Install [Agent Skills](https://agentskills.io) from GitHub repositories.
+
+> **Note:** This tool implements the [agentskills.io specification](https://agentskills.io/specification). Your AI agent (Claude Code, Cursor, VS Code, etc.) likely already supports this spec natively and can discover skills automatically. This tool is primarily useful for:
+> - Installing skills from private repositories
+> - Batch installing multiple skills
+> - Managing skills across projects
 
 ## Install
 
@@ -18,17 +23,7 @@ Quickly install Claude/Agent skills from another repository. Works standalone an
 
 ## Usage
 
-### Install from repositories with `.claude/skills` directory
-
-Install all skills from another repo (same syntax as `gh repo clone`):
-
-```
-upskill adobe/helix-website
-```
-
-### Install from repositories with individual SKILL.md files
-
-For repositories like `anthropics/skills` that don't have a `.claude/skills` directory, you can:
+Skills are discovered by scanning for `**/SKILL.md` files per the [agentskills.io spec](https://agentskills.io/specification).
 
 **List available skills:**
 ```
@@ -47,46 +42,48 @@ upskill anthropics/skills --all
 
 ### Install skills globally (personal skills)
 
-Use the `-g` or `--global` flag to install skills to `~/.claude/skills` instead of the project's `.claude/skills` directory. Personal skills are available across all your Claude Code projects:
+Use the `-g` or `--global` flag to install skills to `~/.skills` instead of the project's `.skills` directory:
 
-**Install globally:**
 ```
 upskill -g anthropics/skills --skill pdf --skill xlsx
 ```
 
 When installing globally:
-- Skills are installed to `~/.claude/skills`
+- Skills are installed to `~/.skills`
 - `.agents/discover-skills` and `AGENTS.md` are not modified (since these are project-specific)
-- The `-i` flag is ignored (no gitignore updates needed)
 
-### What this does:
-- Creates a temp directory and `gh repo clone`s the source repository
-- For repos with `.claude/skills`: copies everything into `./.claude/skills`
-- For repos with `SKILL.md` files: discovers and copies selected skills
-- Creates `./.agents/discover-skills` (robust, shellcheck-friendly)
-- Adds or updates a Skills section in `./AGENTS.md` with clear start/end markers
-  - Ensures repeated runs do not duplicate the section
+### Install to custom destination
 
-### Options:
-- `-g, --global`: install skills to `~/.claude/skills` (personal skills available across all projects)
-- `-b, --branch <branch>`: use a specific branch, tag, or commit
-- `--skills-path <path>`: change source skills path (default: `.claude/skills`)
-- `--list`: list available skills without installing
-- `--skill <name>`: install specific skill(s) (can be used multiple times)
-- `--all`: install all skills from SKILL.md files
-- `-i`: add created files to `.gitignore` (`.claude/skills/` and `.agents/discover-skills`), idempotent via markers
-
-## Idempotent AGENTS.md updates
-
-The Skills section is inserted between markers. If present, it is replaced in-place:
+Use `--dest-path` to install skills to a custom location:
 
 ```
-<!-- upskill:skills:start -->
-... Skills content ...
-<!-- upskill:skills:end -->
+upskill anthropics/skills --skill pdf --dest-path .claude/skills
 ```
 
-## Discover skills
+This is useful for compatibility with tools that expect skills in different locations (e.g., `.claude/skills`).
+
+### Options
+
+| Option | Description |
+|--------|-------------|
+| `-g, --global` | Install to `~/.skills` (personal skills) |
+| `-b, --branch <ref>` | Branch, tag, or commit to clone |
+| `--dest-path <path>` | Custom destination path (overrides `-g`) |
+| `--list` | List available skills without installing |
+| `--skill <name>` | Install specific skill(s) (repeatable) |
+| `--all` | Install all discovered skills |
+| `-i` | Add `.skills/` to `.gitignore` |
+| `-q, --quiet` | Reduce output |
+
+## How it works
+
+1. Clones the source repository to a temp directory
+2. Scans for all `**/SKILL.md` files (per agentskills.io spec)
+3. Copies selected skill directories to `.skills/` (or custom destination)
+4. Creates `.agents/discover-skills` helper script
+5. Updates `AGENTS.md` with skills section (if source has one)
+
+## Discover installed skills
 
 After installing, list available skills in your project:
 
@@ -94,7 +91,7 @@ After installing, list available skills in your project:
 ./.agents/discover-skills
 ```
 
-This safely scans both project skills (`.claude/skills/**/SKILL.md`) and personal skills (`~/.claude/skills/**/SKILL.md`), handling spaces correctly and printing names/paths/descriptions organized by location.
+This scans both project skills (`.skills/`) and personal skills (`~/.skills/`), plus legacy `.claude/skills` locations for backwards compatibility.
 
 ## Development
 
@@ -102,18 +99,10 @@ This safely scans both project skills (`.claude/skills/**/SKILL.md`) and persona
 - Test: `make test` (network required for `gh repo clone`)
 - CI runs lint + tests on pushes/PRs to `main`.
 
-## Notes
-
-- Requires `gh` CLI for cloning, `git`, and standard Unix tools.
-- If the source AGENTS.md does not contain a `## Skills` section, the update is skipped.
-- The generated `./.agents/discover-skills` improves robustness over the reference script (handles spaces; strict mode).
-
 ## Related Projects
 
-Part of the **[AI Ecoverse](https://github.com/trieloff/ai-ecoverse)** - a comprehensive ecosystem of tools for AI-assisted development:
+Part of the **[AI Ecoverse](https://github.com/trieloff/ai-ecoverse)** - tools for AI-assisted development:
 - [yolo](https://github.com/trieloff/yolo) - AI CLI launcher with worktree isolation
 - [ai-aligned-git](https://github.com/trieloff/ai-aligned-git) - Git wrapper for safe AI commit practices
 - [ai-aligned-gh](https://github.com/trieloff/ai-aligned-gh) - GitHub CLI wrapper for proper AI attribution
 - [vibe-coded-badge-action](https://github.com/trieloff/vibe-coded-badge-action) - Badge showing AI-generated code percentage
-- [gh-workflow-peek](https://github.com/trieloff/gh-workflow-peek) - Smarter GitHub Actions log filtering
-- [as-a-bot](https://github.com/trieloff/as-a-bot) - GitHub App token broker for proper AI attribution

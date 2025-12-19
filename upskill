@@ -8,29 +8,33 @@ VERSION="0.1.0"
 usage() {
   cat <<USAGE
 ${PROGRAM_NAME} ${VERSION}
-Install Claude/Agent skills from another GitHub repository.
+Install Agent Skills from another GitHub repository.
+Implements the agentskills.io specification: https://agentskills.io
 
 Usage:
-  ${PROGRAM_NAME} [-i] [-g] <owner/repo> [-b <branch>] [--skills-path <path>] [--list] [--skill <name>] [--all]
+  ${PROGRAM_NAME} [-i] [-g] <owner/repo> [-b <branch>] [--dest-path <path>] [--list] [--skill <name>] [--all]
 
 Examples:
-  ${PROGRAM_NAME} adobe/helix-website -b agent-skills
   ${PROGRAM_NAME} anthropics/skills --list
   ${PROGRAM_NAME} anthropics/skills --skill pdf --skill xlsx
   ${PROGRAM_NAME} anthropics/skills --all
-  ${PROGRAM_NAME} -g anthropics/skills --skill pdf  # Install to ~/.claude/skills
+  ${PROGRAM_NAME} -g anthropics/skills --skill pdf  # Install to ~/.skills
+  ${PROGRAM_NAME} anthropics/skills --dest-path .claude/skills  # Custom destination
 
 Options:
   -i                        Add created files to .gitignore
-  -g, --global              Install skills to ~/.claude/skills (personal skills)
+  -g, --global              Install skills to ~/.skills (personal skills)
   -b, --branch <branch>     Branch, tag, or commit to clone (default: repo default)
-  --skills-path <path>      Path to skills in source repo (default: .claude/skills)
+  --dest-path <path>        Custom destination path for skills (overrides -g)
   --list                    List available skills without installing
   --skill <name>            Install specific skill(s) (can be used multiple times)
   --all                     Install all skills from SKILL.md files
   -q, --quiet               Reduce output
   -h, --help                Show help
   -v, --version             Show version
+
+Note: Skills are discovered by scanning for **/SKILL.md files per the agentskills.io spec.
+      Your agent likely already supports this spec natively - this tool may not be needed.
 USAGE
 }
 
@@ -112,8 +116,10 @@ IFS=$'\n\t'
 # Discover available skills in both project and global directories
 # Usage: .agents/discover-skills
 
-PROJECT_SKILLS_DIR=".claude/skills"
-GLOBAL_SKILLS_DIR="$HOME/.claude/skills"
+PROJECT_SKILLS_DIR=".skills"
+PROJECT_SKILLS_DIR_LEGACY=".claude/skills"
+GLOBAL_SKILLS_DIR="$HOME/.skills"
+GLOBAL_SKILLS_DIR_LEGACY="$HOME/.claude/skills"
 
 process_skills_directory() {
   local skills_dir="$1"
@@ -179,17 +185,19 @@ echo "Available Skills:"
 echo "=================="
 echo ""
 
-# Check project skills
-process_skills_directory "$PROJECT_SKILLS_DIR" "Project Skills (.claude/skills)"
+# Check project skills (new location first, then legacy)
+process_skills_directory "$PROJECT_SKILLS_DIR" "Project Skills (.skills)"
+process_skills_directory "$PROJECT_SKILLS_DIR_LEGACY" "Project Skills (.claude/skills - legacy)"
 
-# Check global skills
-process_skills_directory "$GLOBAL_SKILLS_DIR" "Personal Skills (~/.claude/skills)"
+# Check global skills (new location first, then legacy)
+process_skills_directory "$GLOBAL_SKILLS_DIR" "Personal Skills (~/.skills)"
+process_skills_directory "$GLOBAL_SKILLS_DIR_LEGACY" "Personal Skills (~/.claude/skills - legacy)"
 
 # If no skills found at all
-if [[ ! -d "$PROJECT_SKILLS_DIR" && ! -d "$GLOBAL_SKILLS_DIR" ]]; then
+if [[ ! -d "$PROJECT_SKILLS_DIR" && ! -d "$PROJECT_SKILLS_DIR_LEGACY" && ! -d "$GLOBAL_SKILLS_DIR" && ! -d "$GLOBAL_SKILLS_DIR_LEGACY" ]]; then
   echo "No skills directories found."
-  echo "- Project skills: $PROJECT_SKILLS_DIR"
-  echo "- Personal skills: $GLOBAL_SKILLS_DIR"
+  echo "- Project skills: $PROJECT_SKILLS_DIR (or $PROJECT_SKILLS_DIR_LEGACY)"
+  echo "- Personal skills: $GLOBAL_SKILLS_DIR (or $GLOBAL_SKILLS_DIR_LEGACY)"
 fi
 SCRIPT
 }
@@ -300,7 +308,7 @@ copy_skill() {
 main() {
   local repo=""
   local branch=""
-  local skills_rel_path=".claude/skills"
+  local dest_path=""
   local add_to_gitignore=""
   local list_only=""
   local install_all=""
@@ -315,7 +323,7 @@ main() {
       -i) add_to_gitignore=1; shift ;;
       -g|--global) global_install=1; shift ;;
       -b|--branch) branch="$2"; shift 2 ;;
-      --skills-path) skills_rel_path="$2"; shift 2 ;;
+      --dest-path) dest_path="$2"; shift 2 ;;
       --list) list_only=1; shift ;;
       --all) install_all=1; shift ;;
       --skill) selected_skills+=("$2"); shift 2 ;;
@@ -357,95 +365,77 @@ main() {
     gh repo clone "$repo" "$clone_dir" >/dev/null
   fi
 
-  # Check if source has .claude/skills directory
-  local src_skills_dir has_claude_dir
-  src_skills_dir="$clone_dir/$skills_rel_path"
-  has_claude_dir=""
+  # Scan for all SKILL.md files (per agentskills.io spec)
+  log "Scanning for SKILL.md files..."
+  local tmpfile
+  tmpfile=$(mktemp)
+  discover_skill_files "$clone_dir" >"$tmpfile"
 
-  if [[ -d "$src_skills_dir" ]]; then
-    has_claude_dir=1
-    log "Found .claude/skills directory in repository"
-  else
-    log "No .claude/skills directory found, looking for SKILL.md files..."
+  if [[ ! -s "$tmpfile" ]]; then
+    rm -f "$tmpfile"
+    die "No skills found in repository (no SKILL.md files)"
   fi
+
+  local total_count
+  total_count=$(wc -l <"$tmpfile" | tr -d ' ')
+  log "Found $total_count skill(s)"
 
   # Handle --list flag
   if [[ -n "$list_only" ]]; then
-    if [[ -n "$has_claude_dir" ]]; then
-      list_skills "$src_skills_dir" "$repo"
-    else
-      list_skills "$clone_dir" "$repo"
-    fi
+    list_skills "$clone_dir" "$repo"
+    rm -f "$tmpfile"
     exit 0
   fi
 
+  # Determine destination: --dest-path > --global > default (.skills)
   local dest_skills_dir
-  if [[ -n "$global_install" ]]; then
-    dest_skills_dir="$HOME/.claude/skills"
+  if [[ -n "$dest_path" ]]; then
+    dest_skills_dir="$dest_path"
+    log "Installing skills to custom path: $dest_skills_dir"
+  elif [[ -n "$global_install" ]]; then
+    dest_skills_dir="$HOME/.skills"
     log "Installing skills globally to $dest_skills_dir"
   else
-    dest_skills_dir=".claude/skills"
+    dest_skills_dir=".skills"
   fi
   mkdir -p "$dest_skills_dir"
 
-  # Install skills based on mode
-  if [[ -n "$has_claude_dir" ]]; then
-    # Traditional mode: copy entire .claude/skills directory
-    log "Copying skills from $src_skills_dir to $dest_skills_dir ..."
-    copy_tree "$src_skills_dir" "$dest_skills_dir"
-  else
-    # New mode: find and copy individual SKILL.md files
-    local skill_count=0
-    local tmpfile
-    tmpfile=$(mktemp)
+  # Install skills
+  local skill_count=0
 
-    # Build list of available skills
-    discover_skill_files "$clone_dir" >"$tmpfile"
-
-    if [[ ! -s "$tmpfile" ]]; then
-      rm -f "$tmpfile"
-      die "No skills found in repository (no .claude/skills directory and no SKILL.md files)"
-    fi
-
-    # Determine which skills to install
-    if [[ -n "$install_all" ]]; then
-      local total_count
-      total_count=$(wc -l <"$tmpfile")
-      log "Installing all $total_count skills..."
+  if [[ -n "$install_all" ]]; then
+    log "Installing all $total_count skills..."
+    while IFS='|' read -r name path description; do
+      copy_skill "$path" "$dest_skills_dir"
+      skill_count=$((skill_count + 1))
+    done <"$tmpfile"
+  elif [[ ${#selected_skills[@]} -gt 0 ]]; then
+    log "Installing ${#selected_skills[@]} selected skill(s)..."
+    for skill_name in "${selected_skills[@]}"; do
+      local found=""
       while IFS='|' read -r name path description; do
-        copy_skill "$path" "$dest_skills_dir"
-        skill_count=$((skill_count + 1))
-      done <"$tmpfile"
-    elif [[ ${#selected_skills[@]} -gt 0 ]]; then
-      log "Installing ${#selected_skills[@]} selected skill(s)..."
-      for skill_name in "${selected_skills[@]}"; do
-        local found=""
-        while IFS='|' read -r name path description; do
-          if [[ "$name" == "$skill_name" ]]; then
-            copy_skill "$path" "$dest_skills_dir"
-            skill_count=$((skill_count + 1))
-            found=1
-            break
-          fi
-        done <"$tmpfile"
-        if [[ -z "$found" ]]; then
-          rm -f "$tmpfile"
-          die "Skill not found: $skill_name (use --list to see available skills)"
+        if [[ "$name" == "$skill_name" ]]; then
+          copy_skill "$path" "$dest_skills_dir"
+          skill_count=$((skill_count + 1))
+          found=1
+          break
         fi
-      done
-    else
-      # No .claude directory and no flags - show available skills
-      echo "No .claude/skills directory found in repository."
-      echo ""
-      list_skills "$clone_dir" "$repo"
-      echo ""
-      rm -f "$tmpfile"
-      die "Please specify which skills to install using --skill or --all"
-    fi
-
+      done <"$tmpfile"
+      if [[ -z "$found" ]]; then
+        rm -f "$tmpfile"
+        die "Skill not found: $skill_name (use --list to see available skills)"
+      fi
+    done
+  else
+    # No flags - show available skills and prompt
+    list_skills "$clone_dir" "$repo"
+    echo ""
     rm -f "$tmpfile"
-    log "Installed $skill_count skill(s)"
+    die "Please specify which skills to install using --skill or --all"
   fi
+
+  rm -f "$tmpfile"
+  log "Installed $skill_count skill(s)"
 
   # For local installs, write .agents/discover-skills and update AGENTS.md
   if [[ -z "$global_install" ]]; then
@@ -483,7 +473,7 @@ main() {
       end_marker="# upskill:gitignore:end"
       local block
       block=$(cat <<'EOB'
-.claude/skills/
+.skills/
 .agents/discover-skills
 EOB
 )
