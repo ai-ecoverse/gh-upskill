@@ -40,6 +40,21 @@ upskill anthropics/skills --skill pdf --skill xlsx
 upskill anthropics/skills --all
 ```
 
+### Filter by subfolder
+
+Use `-p` or `--path` to restrict skill discovery to a subfolder within the repository. This is useful for repos that organize skills in nested directories:
+
+```
+upskill adobe/skills --path skills/aem/edge-delivery-services --list
+upskill adobe/skills --path skills/aem/edge-delivery-services --all
+upskill adobe/skills --path skills/aem/edge-delivery-services --skill content-driven-development
+```
+
+This is equivalent to the Vercel Skills CLI's tree-URL syntax:
+```
+npx skills add https://github.com/adobe/skills/tree/main/skills/aem/edge-delivery-services --all
+```
+
 ### Install skills globally (personal skills)
 
 Use the `-g` or `--global` flag to install skills to `~/.skills` instead of the project's `.skills` directory:
@@ -68,6 +83,7 @@ This is useful for compatibility with tools that expect skills in different loca
 |--------|-------------|
 | `-g, --global` | Install to `~/.skills` (personal skills) |
 | `-b, --branch <ref>` | Branch, tag, or commit to clone |
+| `-p, --path <subfolder>` | Only discover skills under this subfolder |
 | `--dest-path <path>` | Custom destination path (overrides `-g`) |
 | `--list` | List available skills without installing |
 | `--skill <name>` | Install specific skill(s) (repeatable) |

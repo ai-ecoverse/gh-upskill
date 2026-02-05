@@ -12,7 +12,7 @@ Install Agent Skills from another GitHub repository.
 Implements the agentskills.io specification: https://agentskills.io
 
 Usage:
-  ${PROGRAM_NAME} [-i] [-g] <owner/repo> [-b <branch>] [--dest-path <path>] [--list] [--skill <name>] [--all]
+  ${PROGRAM_NAME} [-i] [-g] <owner/repo> [-b <branch>] [--path <subfolder>] [--dest-path <path>] [--list] [--skill <name>] [--all]
 
 Examples:
   ${PROGRAM_NAME} anthropics/skills --list
@@ -20,11 +20,13 @@ Examples:
   ${PROGRAM_NAME} anthropics/skills --all
   ${PROGRAM_NAME} -g anthropics/skills --skill pdf  # Install to ~/.skills
   ${PROGRAM_NAME} anthropics/skills --dest-path .claude/skills  # Custom destination
+  ${PROGRAM_NAME} adobe/skills --path skills/aem/edge-delivery-services --all  # Subfolder
 
 Options:
   -i                        Add created files to .gitignore
   -g, --global              Install skills to ~/.skills (personal skills)
   -b, --branch <branch>     Branch, tag, or commit to clone (default: repo default)
+  -p, --path <subfolder>    Only discover skills under this subfolder
   --dest-path <path>        Custom destination path for skills (overrides -g)
   --list                    List available skills without installing
   --skill <name>            Install specific skill(s) (can be used multiple times)
@@ -308,6 +310,7 @@ copy_skill() {
 main() {
   local repo=""
   local branch=""
+  local sub_path=""
   local dest_path=""
   local add_to_gitignore=""
   local list_only=""
@@ -323,6 +326,7 @@ main() {
       -i) add_to_gitignore=1; shift ;;
       -g|--global) global_install=1; shift ;;
       -b|--branch) branch="$2"; shift 2 ;;
+      -p|--path) sub_path="$2"; shift 2 ;;
       --dest-path) dest_path="$2"; shift 2 ;;
       --list) list_only=1; shift ;;
       --all) install_all=1; shift ;;
@@ -365,11 +369,19 @@ main() {
     gh repo clone "$repo" "$clone_dir" >/dev/null
   fi
 
+  # Determine search root (optionally restricted to a subfolder)
+  local search_dir="$clone_dir"
+  if [[ -n "$sub_path" ]]; then
+    search_dir="$clone_dir/$sub_path"
+    [[ -d "$search_dir" ]] || die "Path not found in repository: $sub_path"
+    log "Restricting skill discovery to: $sub_path"
+  fi
+
   # Scan for all SKILL.md files (per agentskills.io spec)
   log "Scanning for SKILL.md files..."
   local tmpfile
   tmpfile=$(mktemp)
-  discover_skill_files "$clone_dir" >"$tmpfile"
+  discover_skill_files "$search_dir" >"$tmpfile"
 
   if [[ ! -s "$tmpfile" ]]; then
     rm -f "$tmpfile"
@@ -382,7 +394,7 @@ main() {
 
   # Handle --list flag
   if [[ -n "$list_only" ]]; then
-    list_skills "$clone_dir" "$repo"
+    list_skills "$search_dir" "$repo"
     rm -f "$tmpfile"
     exit 0
   fi
@@ -428,7 +440,7 @@ main() {
     done
   else
     # No flags - show available skills and prompt
-    list_skills "$clone_dir" "$repo"
+    list_skills "$search_dir" "$repo"
     echo ""
     rm -f "$tmpfile"
     die "Please specify which skills to install using --skill or --all"

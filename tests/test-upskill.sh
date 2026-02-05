@@ -71,6 +71,22 @@ test -d custom-skills || { echo "FAIL: custom-skills directory missing"; exit 1;
 count_custom=$(find custom-skills -name 'SKILL.md' -type f | wc -l | tr -d ' ')
 [[ "$count_custom" -gt 0 ]] || { echo "FAIL: No skills in custom destination"; exit 1; }
 
+# Test --path flag (subfolder filtering)
+echo "Testing --path flag ..."
+"$ROOT_DIR/upskill" adobe/skills -b main --path skills/aem/edge-delivery-services --all --dest-path path-filtered-skills
+test -d path-filtered-skills || { echo "FAIL: path-filtered-skills directory missing"; exit 1; }
+count_path=$(find path-filtered-skills -name 'SKILL.md' -type f | wc -l | tr -d ' ')
+[[ "$count_path" -gt 0 ]] || { echo "FAIL: No skills found with --path filter"; exit 1; }
+echo "Found $count_path skill(s) with --path filter"
+
+# Test --path with invalid path
+echo "Testing --path with invalid path ..."
+if "$ROOT_DIR/upskill" adobe/skills -b main --path nonexistent/path --all --dest-path bad-path 2>/dev/null; then
+  echo "FAIL: --path with invalid path should have failed"
+  exit 1
+fi
+echo "Correctly rejected invalid --path"
+
 echo "OK"
 
 popd >/dev/null
