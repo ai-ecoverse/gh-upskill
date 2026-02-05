@@ -374,6 +374,15 @@ main() {
   if [[ -n "$sub_path" ]]; then
     search_dir="$clone_dir/$sub_path"
     [[ -d "$search_dir" ]] || die "Path not found in repository: $sub_path"
+
+    # Prevent path traversal outside the cloned repo
+    local canonical_clone canonical_search
+    canonical_clone=$(cd "$clone_dir" && pwd -P)
+    canonical_search=$(cd "$search_dir" && pwd -P)
+    if [[ "$canonical_search" != "$canonical_clone"/* && "$canonical_search" != "$canonical_clone" ]]; then
+      die "Path must be within the repository: $sub_path"
+    fi
+
     log "Restricting skill discovery to: $sub_path"
   fi
 
