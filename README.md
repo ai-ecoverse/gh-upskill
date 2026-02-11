@@ -2,7 +2,7 @@
 
 # upskill
 
-[![36% Vibe_Coded](https://img.shields.io/badge/36%25-Vibe_Coded-ff69b4?style=for-the-badge&logo=claude&logoColor=white)](https://github.com/trieloff/vibe-coded-badge-action)
+[![43% Vibe_Coded](https://img.shields.io/badge/43%25-Vibe_Coded-ff69b4?style=for-the-badge&logo=claude&logoColor=white)](https://github.com/trieloff/vibe-coded-badge-action)
 
 Install [Agent Skills](https://agentskills.io) from GitHub repositories.
 
