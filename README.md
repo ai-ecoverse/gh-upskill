@@ -2,7 +2,7 @@
 
 # upskill
 
-[![43% Vibe_Coded](https://img.shields.io/badge/43%25-Vibe_Coded-ff69b4?style=for-the-badge&logo=claude&logoColor=white)](https://github.com/trieloff/vibe-coded-badge-action)
+[![43% Vibe_Coded](https://img.shields.io/badge/43%25-Vibe_Coded-ff69b4?style=for-the-badge&logo=claude&logoColor=white)](https://github.com/ai-ecoverse/vibe-coded-badge-action)
 
 Install [Agent Skills](https://agentskills.io) from GitHub repositories.
 
@@ -117,8 +117,8 @@ This scans both project skills (`.skills/`) and personal skills (`~/.skills/`), 
 
 ## Related Projects
 
-Part of the **[AI Ecoverse](https://github.com/trieloff/ai-ecoverse)** - tools for AI-assisted development:
-- [yolo](https://github.com/trieloff/yolo) - AI CLI launcher with worktree isolation
-- [ai-aligned-git](https://github.com/trieloff/ai-aligned-git) - Git wrapper for safe AI commit practices
-- [ai-aligned-gh](https://github.com/trieloff/ai-aligned-gh) - GitHub CLI wrapper for proper AI attribution
-- [vibe-coded-badge-action](https://github.com/trieloff/vibe-coded-badge-action) - Badge showing AI-generated code percentage
+Part of the **[AI Ecoverse](https://github.com/ai-ecoverse/.github)** - tools for AI-assisted development:
+- [yolo](https://github.com/ai-ecoverse/yolo) - AI CLI launcher with worktree isolation
+- [ai-aligned-git](https://github.com/ai-ecoverse/ai-aligned-git) - Git wrapper for safe AI commit practices
+- [ai-aligned-gh](https://github.com/ai-ecoverse/ai-aligned-gh) - GitHub CLI wrapper for proper AI attribution
+- [vibe-coded-badge-action](https://github.com/ai-ecoverse/vibe-coded-badge-action) - Badge showing AI-generated code percentage

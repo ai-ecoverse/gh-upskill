@@ -17,4 +17,4 @@ jobs:
       with:
         fetch-depth: 0
 
-    - uses: trieloff/vibe-coded-badge-action@main
+    - uses: ai-ecoverse/vibe-coded-badge-action@main
