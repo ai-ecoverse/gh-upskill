@@ -14,11 +14,11 @@ Install [Agent Skills](https://agentskills.io) from GitHub repositories.
 ## Install
 
 - Standalone
-  - macOS/Linux: `curl -fsSL https://raw.githubusercontent.com/trieloff/gh-upskill/main/install.sh | bash`
-  - Custom prefix: `curl -fsSL https://raw.githubusercontent.com/trieloff/gh-upskill/main/install.sh | bash -s -- --prefix ~/.local`
+  - macOS/Linux: `curl -fsSL https://raw.githubusercontent.com/ai-ecoverse/gh-upskill/main/install.sh | bash`
+  - Custom prefix: `curl -fsSL https://raw.githubusercontent.com/ai-ecoverse/gh-upskill/main/install.sh | bash -s -- --prefix ~/.local`
 
 - GitHub CLI extension
-  - `gh extension install trieloff/gh-upskill`
+  - `gh extension install ai-ecoverse/gh-upskill`
   - Then run via `gh upskill ...` (or use `upskill` directly)
 
 ## Usage
