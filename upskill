@@ -363,10 +363,10 @@ main() {
 
   if [[ -n "$branch" ]]; then
     log "Cloning $repo (branch: $branch) ..."
-    gh repo clone "$repo" "$clone_dir" -- -b "$branch" >/dev/null
+    gh repo clone "$repo" "$clone_dir" -- -b "$branch" --depth 1 >/dev/null
   else
     log "Cloning $repo ..."
-    gh repo clone "$repo" "$clone_dir" >/dev/null
+    gh repo clone "$repo" "$clone_dir" -- --depth 1 >/dev/null
   fi
 
   # Determine search root (optionally restricted to a subfolder)
