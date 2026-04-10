@@ -281,12 +281,14 @@ main() {
 
   # Install skills
   local skill_count=0
+  local -a installed_skill_names=()
 
   if [[ -n "$install_all" ]]; then
     log "Installing all $total_count skills..."
     while IFS='|' read -r name path description; do
       copy_skill "$path" "$dest_skills_dir"
       skill_count=$((skill_count + 1))
+      installed_skill_names+=("$(basename "$(dirname "$path")")")
     done <"$tmpfile"
   elif [[ ${#selected_skills[@]} -gt 0 ]]; then
     log "Installing ${#selected_skills[@]} selected skill(s)..."
@@ -296,6 +298,7 @@ main() {
         if [[ "$name" == "$skill_name" ]]; then
           copy_skill "$path" "$dest_skills_dir"
           skill_count=$((skill_count + 1))
+          installed_skill_names+=("$(basename "$(dirname "$path")")")
           found=1
           break
         fi
@@ -335,18 +338,15 @@ main() {
       log "Also installing to $claude_dest (Claude Code detected)"
       mkdir -p "$claude_dest"
       # Copy each installed skill from the primary destination to the Claude destination
-      for skill_subdir in "$dest_skills_dir"/*/; do
-        [[ -d "$skill_subdir" ]] || continue
-        local sname
-        sname=$(basename "$skill_subdir")
+      for sname in "${installed_skill_names[@]}"; do
         mkdir -p "$claude_dest/$sname"
-        copy_tree "$skill_subdir" "$claude_dest/$sname"
+        copy_tree "$dest_skills_dir/$sname" "$claude_dest/$sname"
       done
 
       # If -i is set and this is a local install, add .claude/skills/ to .gitignore
       if [[ -n "${add_to_gitignore:-}" && -z "$global_install" ]]; then
         if ! grep -qxF '.claude/skills/' .gitignore 2>/dev/null; then
-          printf '.claude/skills/\n' >>.gitignore
+          printf '\n.claude/skills/\n' >>.gitignore
           log "Added .claude/skills/ to .gitignore"
         fi
       fi
@@ -355,9 +355,12 @@ main() {
 
   # Optionally add skills directory to .gitignore
   if [[ -n "$add_to_gitignore" && -z "$global_install" ]]; then
-    if ! grep -qxF '.agents/skills/' .gitignore 2>/dev/null; then
-      printf '\n# upskill\n.agents/skills/\n' >>.gitignore
-      log "Added .agents/skills/ to .gitignore"
+    local gitignore_entry="${dest_skills_dir%/}/"
+    if [[ "$gitignore_entry" != /* ]]; then
+      if ! grep -qxF "$gitignore_entry" .gitignore 2>/dev/null; then
+        printf '\n# upskill\n%s\n' "$gitignore_entry" >>.gitignore
+        log "Added $gitignore_entry to .gitignore"
+      fi
     fi
   fi
 
