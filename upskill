@@ -8,7 +8,7 @@ VERSION="0.1.0"
 usage() {
   cat <<USAGE
 ${PROGRAM_NAME} ${VERSION}
-Install Agent Skills from another GitHub repository.
+Install Agent Skills from GitHub, ClawHub, or Tessl registries.
 Implements the agentskills.io specification: https://agentskills.io
 
 Usage:
@@ -16,13 +16,29 @@ Usage:
   ${PROGRAM_NAME} list
   ${PROGRAM_NAME} info <name>
   ${PROGRAM_NAME} read <name>
+  ${PROGRAM_NAME} clawhub:<slug>
+  ${PROGRAM_NAME} https://clawhub.ai/<user>/<slug>
+  ${PROGRAM_NAME} tessl:<name>
+  ${PROGRAM_NAME} search <query>
+  ${PROGRAM_NAME} recommendations [--install]
 
 Subcommands:
   list                          List locally installed/discovered skills
   info <name>                   Show details about a locally installed skill
   read <name>                   Print the SKILL.md content of a locally installed skill
+  search <query>                Search ClawHub and Tessl skill registries
+  recommendations               Recommend skills based on your profile
+  recommendations --install     Install all recommended skills
+
+Install sources:
+  owner/repo[@branch]           GitHub repository (default)
+  clawhub:<slug>                ClawHub skill by slug
+  https://clawhub.ai/u/slug     ClawHub skill by URL
+  tessl:<name>                  Tessl registry skill (resolves to GitHub)
 
 Examples:
+  ${PROGRAM_NAME} search "pdf converter"                      # Search registries
+  ${PROGRAM_NAME} recommendations                             # Show recommendations
   ${PROGRAM_NAME} list                                        # Show local skills
   ${PROGRAM_NAME} anthropics/skills --list
   ${PROGRAM_NAME} anthropics/skills --skill pdf --skill xlsx
@@ -32,6 +48,9 @@ Examples:
   ${PROGRAM_NAME} anthropics/skills --dest-path .claude/skills  # Custom destination
   ${PROGRAM_NAME} adobe/skills --path skills/aem/edge-delivery-services --all  # Subfolder
   ${PROGRAM_NAME} anthropics/skills --all --force     # Overwrite existing skills
+  ${PROGRAM_NAME} clawhub:tavily-search                      # Install from ClawHub
+  ${PROGRAM_NAME} https://clawhub.ai/user/my-skill           # Install from ClawHub URL
+  ${PROGRAM_NAME} tessl:postgres-pro                         # Install from Tessl registry
   ${PROGRAM_NAME} info pdf                                   # Show skill details
   ${PROGRAM_NAME} read pdf                                   # Print SKILL.md content
 
@@ -622,6 +641,554 @@ cmd_read() {
   cat "$skill_path"
 }
 
+is_skill_installed() {
+  # Check if a skill is already installed locally.
+  # $1: skill name
+  local name="$1"
+  local -a dirs=(
+    ".skills/${name}"
+    "${HOME}/.skills/${name}"
+    ".claude/skills/${name}"
+    "${HOME}/.claude/skills/${name}"
+    ".agents/skills/${name}"
+  )
+  for d in "${dirs[@]}"; do
+    if [[ -d "$d" ]]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+load_user_profile() {
+  # Find and load user profile. Sets PROFILE_* variables.
+  # Returns 1 if no profile found.
+  local profile_file=""
+  if [[ -f ".upskill-profile.json" ]]; then
+    profile_file=".upskill-profile.json"
+  elif [[ -f "${HOME}/.upskill-profile.json" ]]; then
+    profile_file="${HOME}/.upskill-profile.json"
+  fi
+
+  if [[ -z "$profile_file" ]]; then
+    return 1
+  fi
+
+  PROFILE_PURPOSE=$(jq -r '.purpose // ""' "$profile_file")
+  PROFILE_ROLE=$(jq -r '.role // ""' "$profile_file")
+  # Arrays as comma-separated strings
+  PROFILE_TASKS=$(jq -r '(.tasks // []) | join(",")' "$profile_file")
+  PROFILE_APPS=$(jq -r '(.apps // []) | join(",")' "$profile_file")
+  return 0
+}
+
+score_catalog() {
+  # Read catalog JSON from stdin and score against profile.
+  # Outputs: score|name|displayName|description|repo|path|skill|matchDetail
+  # Filters out score==0 and already-installed skills.
+  jq -r --arg p_apps "$PROFILE_APPS" \
+         --arg p_tasks "$PROFILE_TASKS" \
+         --arg p_role "$PROFILE_ROLE" \
+         --arg p_purpose "$PROFILE_PURPOSE" '
+    .data[] |
+    . as $item |
+
+    # Split profile values
+    ($p_apps | split(",") | map(select(. != ""))) as $pa |
+    ($p_tasks | split(",") | map(select(. != ""))) as $pt |
+
+    # Split item values
+    (($item.apps // "") | split(",") | map(select(. != ""))) as $ia |
+    (($item.tasks // "") | split(",") | map(select(. != ""))) as $it |
+
+    # Compute matches
+    ([$pa[] | select(. as $a | $ia | index($a))] ) as $app_matches |
+    ([$pt[] | select(. as $t | $it | index($t))] ) as $task_matches |
+
+    (if ($item.role // "") == $p_role and $p_role != "" then 1 else 0 end) as $role_match |
+    (if ($item.purpose // "") == $p_purpose and $p_purpose != "" then 1 else 0 end) as $purpose_match |
+
+    # Score
+    (($app_matches | length) * 3 +
+     ($task_matches | length) * 2 +
+     $role_match +
+     $purpose_match) as $raw_score |
+
+    # Boost
+    (($item.boost // $item.priority // "1") | tonumber) as $boost |
+    (($raw_score * $boost) | floor) as $score |
+
+    # Match detail string
+    (
+      ([$app_matches[] | "apps(" + . + ")"] +
+       [$task_matches[] | "tasks(" + . + ")"] +
+       (if $role_match == 1 then ["role(" + $p_role + ")"] else [] end) +
+       (if $purpose_match == 1 then ["purpose(" + $p_purpose + ")"] else [] end)
+      ) | join(", ")
+    ) as $match_detail |
+
+    select($score > 0) |
+    [($score | tostring),
+     ($item.name // ""),
+     ($item.displayName // $item.name // ""),
+     ($item.description // ""),
+     ($item.repo // ""),
+     ($item.path // ""),
+     ($item.skill // ""),
+     $match_detail
+    ] | join("|")
+  ' | sort -t'|' -k1 -rn
+}
+
+cmd_recommendations() {
+  local do_install=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --install) do_install=1; shift ;;
+      *) die "Unknown option for recommendations: $1" ;;
+    esac
+  done
+
+  require_cmd jq
+  require_cmd curl
+
+  # Load user profile
+  if ! load_user_profile; then
+    echo "No user profile found." >&2
+    echo "" >&2
+    echo "Create a profile at .upskill-profile.json or ~/.upskill-profile.json:" >&2
+    echo "" >&2
+    cat >&2 <<'PROFILE_EXAMPLE'
+{
+  "name": "Your Name",
+  "purpose": "work",
+  "role": "developer",
+  "tasks": ["build-websites", "seo"],
+  "apps": ["aem", "figma"]
+}
+PROFILE_EXAMPLE
+    echo "" >&2
+    echo "Fields:" >&2
+    echo "  name     Your name (for display)" >&2
+    echo "  purpose  work | personal | education" >&2
+    echo "  role     developer | designer | marketer | author | ..." >&2
+    echo "  tasks    List of tasks you perform" >&2
+    echo "  apps     List of apps/tools you use" >&2
+    exit 1
+  fi
+
+  # Fetch catalog
+  local catalog_url="https://www.sliccy.com/skills/catalog.json"
+  local catalog_body http_status tmpfile
+  tmpfile=$(mktemp)
+  http_status=$(curl -sS -w '%{http_code}' -o "$tmpfile" "$catalog_url" 2>/dev/null) || true
+  catalog_body=$(cat "$tmpfile")
+  rm -f "$tmpfile"
+
+  if [[ ! "$http_status" =~ ^2 ]]; then
+    die "Failed to fetch skill catalog (HTTP ${http_status})"
+  fi
+
+  # Score and filter
+  local scored
+  scored=$(printf '%s' "$catalog_body" | score_catalog)
+
+  # Filter out already-installed skills
+  local filtered=""
+  while IFS='|' read -r score name displayName description repo path skill matchDetail; do
+    [[ -z "$score" ]] && continue
+    if ! is_skill_installed "$name"; then
+      filtered+="${score}|${name}|${displayName}|${description}|${repo}|${path}|${skill}|${matchDetail}"$'\n'
+    fi
+  done <<< "$scored"
+  filtered="${filtered%$'\n'}"
+
+  if [[ -z "$filtered" ]]; then
+    echo "No new skill recommendations found."
+    echo "All matching skills are already installed, or your profile has no matches."
+    return 0
+  fi
+
+  if [[ -n "$do_install" ]]; then
+    # Batch install all recommended skills
+    local count=0
+    while IFS='|' read -r score name displayName description repo path skill matchDetail; do
+      [[ -z "$score" ]] && continue
+      count=$((count + 1))
+      local install_repo="${repo:-}"
+      local install_skill="${skill:-$name}"
+      if [[ -z "$install_repo" ]]; then
+        log "Skipping $displayName: no repo specified in catalog"
+        continue
+      fi
+      local -a cmd_args=("$install_repo" "--skill" "$install_skill")
+      if [[ -n "$path" ]]; then
+        cmd_args+=("--path" "$path")
+      fi
+      echo "Installing: ${displayName} from ${install_repo} ..."
+      main "${cmd_args[@]}" || log "Warning: failed to install ${displayName}"
+    done <<< "$filtered"
+    echo ""
+    echo "Installed ${count} recommended skill(s)."
+    return 0
+  fi
+
+  # Display recommendations
+  echo "Recommended skills for you:"
+  echo ""
+
+  local idx=0
+  local -a install_repos=()
+  local -a install_skills=()
+  local -a install_paths=()
+  while IFS='|' read -r score name displayName description repo path skill matchDetail; do
+    [[ -z "$score" ]] && continue
+    idx=$((idx + 1))
+    install_repos+=("$repo")
+    install_skills+=("${skill:-$name}")
+    install_paths+=("$path")
+
+    # Format: number, display name, right-aligned score
+    printf "  %d. %-40s score: %s\n" "$idx" "$displayName" "$score"
+    if [[ -n "$description" ]]; then
+      printf "     %s\n" "$description"
+    fi
+    printf "     Match: %s\n" "$matchDetail"
+    local install_cmd="${PROGRAM_NAME} ${repo} --skill ${skill:-$name}"
+    if [[ -n "$path" ]]; then
+      install_cmd+=" --path ${path}"
+    fi
+    printf "     Install: %s\n" "$install_cmd"
+    echo ""
+  done <<< "$filtered"
+
+  echo "To install all recommended: ${PROGRAM_NAME} recommendations --install"
+}
+
+install_from_clawhub() {
+  # Install a skill from ClawHub by slug.
+  # $1: slug, $2: dest dir, $3: force flag
+  local slug="$1"
+  local dest_dir="$2"
+  local force="${3:-}"
+
+  require_cmd jq
+  require_cmd curl
+
+  # Check if destination already exists
+  if [[ -d "$dest_dir/$slug" ]]; then
+    if [[ -n "$force" ]]; then
+      log "Overwriting existing skill: $slug"
+      rm -rf "${dest_dir:?}/${slug:?}"
+    else
+      log "Skipped skill: $slug (already exists, use --force to overwrite)"
+      return 0
+    fi
+  fi
+
+  _UPS_TMPDIR=$(mktemp -d)
+  log "Downloading from ClawHub: $slug"
+
+  local zip_url="https://wry-manatee-359.convex.site/api/v1/download?slug=${slug}"
+  local zip_file="$_UPS_TMPDIR/clawhub.zip"
+
+  local http_status
+  http_status=$(curl -sS -w '%{http_code}' -o "$zip_file" "$zip_url" 2>/dev/null) || true
+
+  if [[ ! "$http_status" =~ ^2 ]]; then
+    die "ClawHub download failed (HTTP ${http_status}) for slug: $slug"
+  fi
+
+  # Unzip
+  if ! command -v unzip >/dev/null 2>&1; then
+    die "unzip is required for ClawHub downloads"
+  fi
+  unzip -q "$zip_file" -d "$_UPS_TMPDIR/clawhub_unzipped" 2>/dev/null || die "Failed to unzip ClawHub archive for: $slug"
+
+  # Install into dest_dir/slug, skipping _meta.json
+  mkdir -p "$dest_dir/$slug"
+  local src_dir="$_UPS_TMPDIR/clawhub_unzipped"
+
+  # If there's a single top-level directory, descend into it
+  local top_count
+  top_count=$(find "$src_dir" -mindepth 1 -maxdepth 1 | wc -l | tr -d ' ')
+  if [[ "$top_count" -eq 1 ]]; then
+    local single_dir
+    single_dir=$(find "$src_dir" -mindepth 1 -maxdepth 1 -type d | head -n1)
+    if [[ -n "$single_dir" ]]; then
+      src_dir="$single_dir"
+    fi
+  fi
+
+  # Copy files, skipping _meta.json
+  find "$src_dir" -mindepth 1 -maxdepth 1 -not -name '_meta.json' -print0 |
+    while IFS= read -r -d '' item; do
+      cp -R "$item" "$dest_dir/$slug/"
+    done
+
+  log "Installed skill from ClawHub: $slug → $dest_dir/$slug"
+}
+
+resolve_tessl_ref() {
+  # Resolve a Tessl skill name to owner/repo and optional path.
+  # $1: tessl name
+  # Sets: _TESSL_OWNER_REPO, _TESSL_PATH
+  local name="$1"
+
+  require_cmd jq
+  require_cmd curl
+
+  local encoded_name
+  encoded_name=$(printf '%s' "$name" | sed 's/ /%20/g')
+  local api_url="https://api.tessl.io/experimental/search?q=${encoded_name}&contentType=skills&page%5Bsize%5D=5"
+
+  log "Resolving Tessl skill: $name"
+
+  local http_status tmpbody
+  tmpbody=$(mktemp)
+  http_status=$(curl -sS -w '%{http_code}' -o "$tmpbody" "$api_url" 2>/dev/null) || true
+  local body
+  body=$(cat "$tmpbody")
+  rm -f "$tmpbody"
+
+  if [[ ! "$http_status" =~ ^2 ]]; then
+    die "Tessl API request failed (HTTP ${http_status}) for: $name"
+  fi
+
+  # Find exact match by name
+  local source_url skill_path
+  source_url=$(printf '%s' "$body" | jq -r --arg n "$name" '
+    .data[]
+    | select(.attributes.name == $n)
+    | .attributes.sourceUrl // empty
+  ' 2>/dev/null | head -n1)
+
+  if [[ -z "$source_url" ]]; then
+    die "Tessl skill not found: $name"
+  fi
+
+  skill_path=$(printf '%s' "$body" | jq -r --arg n "$name" '
+    .data[]
+    | select(.attributes.name == $n)
+    | .attributes.path // empty
+  ' 2>/dev/null | head -n1)
+
+  # Parse GitHub URL: https://github.com/owner/repo
+  local gh_part
+  gh_part="${source_url#https://github.com/}"
+  # Remove trailing slashes and .git suffix
+  gh_part="${gh_part%.git}"
+  gh_part="${gh_part%/}"
+
+  # Extract owner/repo (first two path segments)
+  _TESSL_OWNER_REPO=$(printf '%s' "$gh_part" | cut -d'/' -f1-2)
+  _TESSL_PATH="${skill_path:-}"
+
+  if [[ -z "$_TESSL_OWNER_REPO" || "$_TESSL_OWNER_REPO" == "/" ]]; then
+    die "Could not parse GitHub URL from Tessl: $source_url"
+  fi
+
+  log "Resolved Tessl skill '$name' → $_TESSL_OWNER_REPO (path: ${_TESSL_PATH:-<root>})"
+}
+
+cmd_search() {
+  local query="${1:-}"
+  if [[ -z "$query" ]]; then
+    die "Usage: ${PROGRAM_NAME} search <query>"
+  fi
+
+  command -v jq >/dev/null 2>&1 || die "jq is required for the search command"
+  require_cmd curl
+
+  local encoded_query
+  encoded_query=$(printf '%s' "$query" | sed 's/ /%20/g; s/!/%21/g; s/#/%23/g; s/&/%26/g; s/+/%2B/g')
+
+  local clawhub_url="https://wry-manatee-359.convex.site/api/v1/search?q=${encoded_query}"
+  local tessl_url="https://api.tessl.io/experimental/search?q=${encoded_query}&contentType=skills&page%5Bsize%5D=20"
+
+  # Query both registries in parallel
+  local clawhub_tmp tessl_tmp
+  clawhub_tmp=$(mktemp)
+  tessl_tmp=$(mktemp)
+
+  local clawhub_status_tmp tessl_status_tmp
+  clawhub_status_tmp=$(mktemp)
+  tessl_status_tmp=$(mktemp)
+
+  (
+    local status
+    status=$(curl -sS -w '%{http_code}' -o "$clawhub_tmp" \
+      -H 'User-Agent: gh-upskill' \
+      -H 'Accept: application/json' \
+      "$clawhub_url" 2>/dev/null) || status="000"
+    printf '%s' "$status" > "$clawhub_status_tmp"
+  ) &
+  local clawhub_pid=$!
+
+  (
+    local status
+    status=$(curl -sS -w '%{http_code}' -o "$tessl_tmp" \
+      -H 'User-Agent: gh-upskill' \
+      -H 'Accept: application/json' \
+      "$tessl_url" 2>/dev/null) || status="000"
+    printf '%s' "$status" > "$tessl_status_tmp"
+  ) &
+  local tessl_pid=$!
+
+  wait "$clawhub_pid" 2>/dev/null || true
+  wait "$tessl_pid" 2>/dev/null || true
+
+  local clawhub_status tessl_status
+  clawhub_status=$(cat "$clawhub_status_tmp")
+  tessl_status=$(cat "$tessl_status_tmp")
+  rm -f "$clawhub_status_tmp" "$tessl_status_tmp"
+
+  local clawhub_ok="" tessl_ok=""
+  local clawhub_warn="" tessl_warn=""
+
+  # Parse ClawHub results
+  local -a ch_names=() ch_summaries=()
+  if [[ "$clawhub_status" =~ ^2 ]]; then
+    clawhub_ok=1
+    local ch_count
+    ch_count=$(jq -r '.results | length' "$clawhub_tmp" 2>/dev/null) || ch_count=0
+    local idx=0
+    while [[ $idx -lt $ch_count ]]; do
+      local slug display summary
+      slug=$(jq -r ".results[$idx].slug // .results[$idx].displayName // \"\"" "$clawhub_tmp" 2>/dev/null)
+      display=$(jq -r ".results[$idx].displayName // .results[$idx].slug // \"\"" "$clawhub_tmp" 2>/dev/null)
+      summary=$(jq -r ".results[$idx].summary // \"\"" "$clawhub_tmp" 2>/dev/null)
+      ch_names+=("${display:-$slug}")
+      ch_summaries+=("$summary")
+      idx=$((idx + 1))
+    done
+  else
+    clawhub_warn="ClawHub registry unavailable (HTTP ${clawhub_status})"
+  fi
+
+  # Parse Tessl results
+  local -a ts_names=() ts_descriptions=() ts_repos=() ts_scores=()
+  if [[ "$tessl_status" =~ ^2 ]]; then
+    tessl_ok=1
+    local ts_count
+    ts_count=$(jq -r '.data | length' "$tessl_tmp" 2>/dev/null) || ts_count=0
+    local idx=0
+    while [[ $idx -lt $ts_count ]]; do
+      local name desc repo score
+      name=$(jq -r ".data[$idx].attributes.name // \"\"" "$tessl_tmp" 2>/dev/null)
+      desc=$(jq -r ".data[$idx].attributes.description // \"\"" "$tessl_tmp" 2>/dev/null)
+      repo=$(jq -r ".data[$idx].attributes.sourceUrl // \"\"" "$tessl_tmp" 2>/dev/null)
+      score=$(jq -r ".data[$idx].attributes.scores.aggregate // \"\"" "$tessl_tmp" 2>/dev/null)
+      # Convert score from decimal to percentage (e.g. 0.85 -> 85)
+      if [[ -n "$score" && "$score" != "null" && "$score" != "" ]]; then
+        score=$(awk "BEGIN {printf \"%.0f\", $score * 100}" 2>/dev/null) || score=""
+      else
+        score=""
+      fi
+      # Extract owner/repo from sourceUrl
+      if [[ "$repo" == *"github.com/"* ]]; then
+        repo=$(printf '%s' "$repo" | sed 's|.*github\.com/||; s|\.git$||; s|/tree/.*||; s|/$||')
+      fi
+      ts_names+=("$name")
+      ts_descriptions+=("$desc")
+      ts_repos+=("$repo")
+      ts_scores+=("$score")
+      idx=$((idx + 1))
+    done
+  else
+    tessl_warn="Tessl registry unavailable (HTTP ${tessl_status})"
+  fi
+
+  rm -f "$clawhub_tmp" "$tessl_tmp"
+
+  # If both failed, error out
+  if [[ -z "$clawhub_ok" && -z "$tessl_ok" ]]; then
+    die "Both registries failed. ${clawhub_warn}. ${tessl_warn}."
+  fi
+
+  # Show warnings for partial failures
+  if [[ -n "$clawhub_warn" ]]; then
+    printf 'Warning: %s\n' "$clawhub_warn" >&2
+  fi
+  if [[ -n "$tessl_warn" ]]; then
+    printf 'Warning: %s\n' "$tessl_warn" >&2
+  fi
+
+  local total=$(( ${#ch_names[@]} + ${#ts_names[@]} ))
+  printf 'Search results for "%s" (%d results):\n\n' "$query" "$total"
+
+  if [[ "$total" -eq 0 ]]; then
+    echo "  No results found."
+    return 0
+  fi
+
+  # Build interleaved output: lead with up to 3 Tessl results, then alternate
+  local -a out_names=() out_scores=() out_sources=() out_repos=() out_descs=()
+
+  local ts_idx=0 ch_idx=0
+  # Lead with up to 3 Tessl results
+  while [[ $ts_idx -lt ${#ts_names[@]} && $ts_idx -lt 3 ]]; do
+    out_names+=("${ts_names[$ts_idx]}")
+    out_scores+=("${ts_scores[$ts_idx]}")
+    out_sources+=("[tessl]")
+    out_repos+=("${ts_repos[$ts_idx]}")
+    out_descs+=("${ts_descriptions[$ts_idx]}")
+    ts_idx=$((ts_idx + 1))
+  done
+
+  # Interleave remaining
+  while [[ $ch_idx -lt ${#ch_names[@]} || $ts_idx -lt ${#ts_names[@]} ]]; do
+    if [[ $ch_idx -lt ${#ch_names[@]} ]]; then
+      out_names+=("${ch_names[$ch_idx]}")
+      out_scores+=("")
+      out_sources+=("[clawhub]")
+      out_repos+=("")
+      out_descs+=("${ch_summaries[$ch_idx]}")
+      ch_idx=$((ch_idx + 1))
+    fi
+    if [[ $ts_idx -lt ${#ts_names[@]} ]]; then
+      out_names+=("${ts_names[$ts_idx]}")
+      out_scores+=("${ts_scores[$ts_idx]}")
+      out_sources+=("[tessl]")
+      out_repos+=("${ts_repos[$ts_idx]}")
+      out_descs+=("${ts_descriptions[$ts_idx]}")
+      ts_idx=$((ts_idx + 1))
+    fi
+  done
+
+  # Calculate column widths
+  local max_name=4 max_score=5 max_source=6 max_repo=4
+  for ((i = 0; i < ${#out_names[@]}; i++)); do
+    local nl=${#out_names[$i]} sl=${#out_scores[$i]} srcl=${#out_sources[$i]} rl=${#out_repos[$i]}
+    [[ $nl -gt $max_name ]] && max_name=$nl
+    [[ $sl -gt $max_score ]] && max_score=$sl
+    [[ $srcl -gt $max_source ]] && max_source=$srcl
+    [[ $rl -gt $max_repo ]] && max_repo=$rl
+  done
+
+  # Header
+  printf "  %-${max_name}s  %-${max_score}s  %-${max_source}s  %s\n" "NAME" "SCORE" "SOURCE" "REPO"
+
+  # Results with descriptions on next line
+  for ((i = 0; i < ${#out_names[@]}; i++)); do
+    printf "  %-${max_name}s  %-${max_score}s  %-${max_source}s  %s\n" \
+      "${out_names[$i]}" "${out_scores[$i]}" "${out_sources[$i]}" "${out_repos[$i]}"
+    if [[ -n "${out_descs[$i]}" ]]; then
+      # Truncate long descriptions
+      local desc="${out_descs[$i]}"
+      if [[ ${#desc} -gt 80 ]]; then
+        desc="${desc:0:77}..."
+      fi
+      printf "    %s\n" "$desc"
+    fi
+  done
+
+  echo ""
+  echo "To install:"
+  echo "  From ClawHub:  ${PROGRAM_NAME} clawhub:<slug>"
+  echo "  From Tessl:    ${PROGRAM_NAME} <owner/repo> --skill <name>"
+}
+
 main() {
   # Handle subcommands before flag parsing
   case "${1:-}" in
@@ -640,6 +1207,16 @@ main() {
       cmd_read "$@"
       return 0
       ;;
+    search)
+      shift
+      cmd_search "$@"
+      return 0
+      ;;
+    recommendations)
+      shift
+      cmd_recommendations "$@"
+      return 0
+      ;;
   esac
 
   local repo=""
@@ -652,6 +1229,9 @@ main() {
   local install_all=""
   local global_install=""
   local force=""
+  local source_type="github"  # github | clawhub | tessl
+  local clawhub_slug=""
+  local tessl_name=""
   local -a selected_skills=()
 
   while [[ $# -gt 0 ]]; do
@@ -670,7 +1250,24 @@ main() {
       --skill) selected_skills+=("$2"); shift 2 ;;
       -*) die "Unknown option: $1" ;;
       *)
-        if [[ "$1" == *"@"* && "$1" == *"/"* ]]; then
+        if [[ "$1" == https://clawhub.ai/* ]]; then
+          # ClawHub full URL: https://clawhub.ai/<user>/<slug>
+          source_type="clawhub"
+          clawhub_slug="${1##*/}"
+          repo="$1"
+        elif [[ "$1" == clawhub:* ]]; then
+          # ClawHub shorthand: clawhub:<slug> or clawhub:<user>/<slug>
+          source_type="clawhub"
+          local ch_ref="${1#clawhub:}"
+          # Use the last path segment as the slug
+          clawhub_slug="${ch_ref##*/}"
+          repo="$1"
+        elif [[ "$1" == tessl:* ]]; then
+          # Tessl shorthand: tessl:<name>
+          source_type="tessl"
+          tessl_name="${1#tessl:}"
+          repo="$1"
+        elif [[ "$1" == *"@"* && "$1" == *"/"* ]]; then
           repo="${1%%@*}"
           branch_from_ref="${1#*@}"
         else
@@ -700,6 +1297,34 @@ main() {
   require_cmd awk
   require_cmd sed
   require_cmd curl
+
+  # --- ClawHub install path ---
+  if [[ "$source_type" == "clawhub" ]]; then
+    local ch_dest_dir
+    if [[ -n "$dest_path" ]]; then
+      ch_dest_dir="$dest_path"
+    elif [[ -n "$global_install" ]]; then
+      ch_dest_dir="$HOME/.skills"
+    else
+      ch_dest_dir=".skills"
+    fi
+    mkdir -p "$ch_dest_dir"
+    install_from_clawhub "$clawhub_slug" "$ch_dest_dir" "$force"
+    log "Done."
+    return 0
+  fi
+
+  # --- Tessl install path ---
+  if [[ "$source_type" == "tessl" ]]; then
+    resolve_tessl_ref "$tessl_name"
+    # Re-route to GitHub install with resolved owner/repo and path
+    repo="$_TESSL_OWNER_REPO"
+    if [[ -n "$_TESSL_PATH" ]]; then
+      sub_path="$_TESSL_PATH"
+    fi
+    install_all=1
+    log "Installing Tessl skill '$tessl_name' from GitHub: $repo (path: ${sub_path:-<root>})"
+  fi
 
   _UPS_TMPDIR=$(mktemp -d)
   log "Created temp dir: $_UPS_TMPDIR"
