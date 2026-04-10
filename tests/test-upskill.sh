@@ -219,6 +219,118 @@ if "$ROOT_DIR/upskill" read 2>/dev/null; then
 fi
 echo "Correctly rejected read without name"
 
+# ── upskill recommendations subcommand tests ──
+
+# Test recommendations without profile (no network needed)
+echo "Testing 'upskill recommendations' without profile ..."
+no_profile_dir=$(mktemp -d)
+pushd "$no_profile_dir" >/dev/null
+rec_out=$(HOME="$no_profile_dir" "$ROOT_DIR/upskill" recommendations 2>&1 || true)
+echo "$rec_out" | grep -q "No user profile found" || { echo "FAIL: recommendations missing no-profile message"; exit 1; }
+echo "$rec_out" | grep -q "upskill-profile.json" || { echo "FAIL: recommendations missing profile filename hint"; exit 1; }
+echo "$rec_out" | grep -q '"purpose"' || { echo "FAIL: recommendations missing profile format example"; exit 1; }
+echo "$rec_out" | grep -q '"role"' || { echo "FAIL: recommendations missing role in profile example"; exit 1; }
+popd >/dev/null
+rm -rf "$no_profile_dir"
+echo "recommendations without profile works correctly"
+
+# Test that help mentions recommendations
+echo "Testing help includes recommendations subcommand ..."
+help_out=$("$ROOT_DIR/upskill" --help 2>&1)
+echo "$help_out" | grep -q "recommendations" || { echo "FAIL: help does not mention recommendations subcommand"; exit 1; }
+echo "Help text includes recommendations subcommand"
+
+# ── ClawHub and Tessl source detection tests ──
+
+# Test help text mentions ClawHub and Tessl
+echo "Testing help includes ClawHub and Tessl ..."
+help_out=$("$ROOT_DIR/upskill" --help 2>&1)
+echo "$help_out" | grep -q "clawhub:" || { echo "FAIL: help does not mention clawhub: source"; exit 1; }
+echo "$help_out" | grep -q "tessl:" || { echo "FAIL: help does not mention tessl: source"; exit 1; }
+echo "$help_out" | grep -q "clawhub.ai" || { echo "FAIL: help does not mention clawhub.ai URL"; exit 1; }
+echo "$help_out" | grep -q "Install sources:" || { echo "FAIL: help missing Install sources section"; exit 1; }
+echo "Help text includes ClawHub and Tessl sources"
+
+# Test clawhub: shorthand is detected (will fail at download, but confirms routing)
+echo "Testing clawhub: shorthand detection ..."
+ch_out=$("$ROOT_DIR/upskill" clawhub:nonexistent-test-slug-xyz 2>&1 || true)
+if echo "$ch_out" | grep -q "Downloading from ClawHub: nonexistent-test-slug-xyz"; then
+  echo "Correctly routed clawhub: shorthand to ClawHub install path"
+elif echo "$ch_out" | grep -q "ClawHub download failed"; then
+  echo "Correctly routed clawhub: shorthand (download failed as expected for bad slug)"
+else
+  echo "FAIL: clawhub: shorthand was not routed to ClawHub install path"
+  echo "Output: $ch_out"
+  exit 1
+fi
+
+# Test clawhub:<user>/<slug> extracts slug correctly
+echo "Testing clawhub:user/slug detection ..."
+ch2_out=$("$ROOT_DIR/upskill" clawhub:someuser/my-skill 2>&1 || true)
+if echo "$ch2_out" | grep -q "Downloading from ClawHub: my-skill"; then
+  echo "Correctly extracted slug from clawhub:user/slug"
+elif echo "$ch2_out" | grep -q "ClawHub download failed"; then
+  echo "Correctly routed clawhub:user/slug (download failed as expected)"
+else
+  echo "FAIL: clawhub:user/slug was not parsed correctly"
+  echo "Output: $ch2_out"
+  exit 1
+fi
+
+# Test ClawHub full URL detection
+echo "Testing ClawHub URL detection ..."
+ch_url_out=$("$ROOT_DIR/upskill" https://clawhub.ai/someuser/my-url-skill 2>&1 || true)
+if echo "$ch_url_out" | grep -q "Downloading from ClawHub: my-url-skill"; then
+  echo "Correctly extracted slug from ClawHub URL"
+elif echo "$ch_url_out" | grep -q "ClawHub download failed"; then
+  echo "Correctly routed ClawHub URL (download failed as expected)"
+else
+  echo "FAIL: ClawHub URL was not parsed correctly"
+  echo "Output: $ch_url_out"
+  exit 1
+fi
+
+# Test tessl: shorthand detection (will fail at API call, but confirms routing)
+echo "Testing tessl: shorthand detection ..."
+ts_out=$("$ROOT_DIR/upskill" tessl:nonexistent-test-skill-xyz 2>&1 || true)
+if echo "$ts_out" | grep -q "Resolving Tessl skill: nonexistent-test-skill-xyz"; then
+  echo "Correctly routed tessl: shorthand to Tessl resolve path"
+elif echo "$ts_out" | grep -q "Tessl"; then
+  echo "Correctly routed tessl: shorthand (API call made as expected)"
+else
+  echo "FAIL: tessl: shorthand was not routed to Tessl resolve path"
+  echo "Output: $ts_out"
+  exit 1
+fi
+
+# ── upskill search subcommand tests ──
+
+echo "Testing 'upskill search' with a query ..."
+if command -v jq >/dev/null 2>&1; then
+  search_out=$("$ROOT_DIR/upskill" search "pdf" 2>&1)
+  echo "$search_out" | grep -q 'Search results for "pdf"' || { echo "FAIL: search header missing"; exit 1; }
+  echo "$search_out" | grep -q "NAME" || { echo "FAIL: search table header missing"; exit 1; }
+  echo "$search_out" | grep -q "SOURCE" || { echo "FAIL: search SOURCE column missing"; exit 1; }
+  echo "$search_out" | grep -q "To install:" || { echo "FAIL: search install hint missing"; exit 1; }
+  echo "upskill search works"
+
+  # Test search without query argument
+  echo "Testing search without query ..."
+  if "$ROOT_DIR/upskill" search 2>/dev/null; then
+    echo "FAIL: search without query should fail"
+    exit 1
+  fi
+  echo "Correctly rejected search without query"
+
+  # Test that search subcommand is mentioned in help
+  echo "Testing help includes search subcommand ..."
+  help_search_out=$("$ROOT_DIR/upskill" --help 2>&1)
+  echo "$help_search_out" | grep -q "search" || { echo "FAIL: help does not mention search subcommand"; exit 1; }
+  echo "Help text includes search subcommand"
+else
+  echo "SKIP: jq not installed, skipping search tests"
+fi
+
 echo "OK"
 
 popd >/dev/null
