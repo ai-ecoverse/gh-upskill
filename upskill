@@ -45,6 +45,9 @@ Note: You can specify a branch inline with owner/repo@branch syntax.
 
       Downloads repositories as ZIP archives from GitHub (no git/gh required).
       Falls back to 'gh repo clone' if the ZIP download fails and gh is available.
+
+      Authentication: Uses 'gh auth token' automatically when gh CLI is installed.
+      If you hit rate limits, authenticate with: gh auth login
 USAGE
 }
 
@@ -393,9 +396,11 @@ list_skills() {
 
 copy_skill() {
   # $1: skill file path, $2: destination skills dir, $3: force flag (optional)
+  # $4: progress prefix (optional, e.g. "[1/5] ")
   local skill_file="$1"
   local dest_dir="$2"
   local force="${3:-}"
+  local prefix="${4:-}"
   local skill_dir skill_name
 
   skill_dir=$(dirname "$skill_file")
@@ -404,19 +409,21 @@ copy_skill() {
   # Check if destination already exists
   if [[ -d "$dest_dir/$skill_name" ]]; then
     if [[ -n "$force" ]]; then
-      log "Overwriting existing skill: $skill_name"
+      log "${prefix}Overwriting existing skill: $skill_name"
       rm -rf "${dest_dir:?}/${skill_name:?}"
     else
-      log "Warning: Skill $skill_name already exists, skipping (use --force to overwrite)"
-      return 0
+      log "${prefix}Skipped skill: $skill_name (already exists)"
+      return 1
     fi
   fi
 
-  log "Installing skill: $skill_name"
+  log "${prefix}Installing skill: $skill_name"
 
   # Copy the entire skill directory
   mkdir -p "$dest_dir/$skill_name"
   copy_tree "$skill_dir" "$dest_dir/$skill_name"
+
+  log "${prefix}Installed skill: $skill_name"
 }
 
 main() {
@@ -495,25 +502,43 @@ main() {
     local zip_file="$_UPS_TMPDIR/repo.zip"
 
     log "Downloading ZIP: $zip_url"
-    if curl -fsSL -o "$zip_file" "$zip_url" 2>/dev/null; then
-      # Unzip and strip top-level directory prefix
-      if command -v unzip >/dev/null 2>&1; then
-        unzip -q "$zip_file" -d "$_UPS_TMPDIR/unzipped" 2>/dev/null || return 1
-      else
-        die "unzip is required for ZIP-based downloads"
-      fi
+    github_curl -o "$zip_file" "$zip_url"
 
-      # GitHub ZIPs have a single top-level dir: {repo}-{branch}/
-      local top_dir
-      top_dir=$(find "$_UPS_TMPDIR/unzipped" -mindepth 1 -maxdepth 1 -type d | head -n1)
-      if [[ -z "$top_dir" ]]; then
-        return 1
+    # Check for HTTP errors
+    if [[ "$_GITHUB_CURL_STATUS" =~ ^2 ]]; then
+      : # success
+    elif [[ "$_GITHUB_CURL_STATUS" == "404" ]]; then
+      rm -f "$zip_file"
+      return 1  # not found – caller may retry other branches
+    elif [[ "$_GITHUB_CURL_STATUS" == "429" || "$_GITHUB_CURL_STATUS" == "403" || "$_GITHUB_CURL_STATUS" == "401" ]]; then
+      rm -f "$zip_file"
+      # Read error body from file if it exists
+      local err_body=""
+      if [[ -f "$zip_file" ]]; then
+        err_body=$(cat "$zip_file")
       fi
-      mv "$top_dir" "$clone_dir"
-      rm -rf "$_UPS_TMPDIR/unzipped" "$zip_file"
-      return 0
+      handle_github_error "$_GITHUB_CURL_STATUS" "$err_body"
+    else
+      rm -f "$zip_file"
+      return 1
     fi
-    return 1
+
+    # Unzip and strip top-level directory prefix
+    if command -v unzip >/dev/null 2>&1; then
+      unzip -q "$zip_file" -d "$_UPS_TMPDIR/unzipped" 2>/dev/null || return 1
+    else
+      die "unzip is required for ZIP-based downloads"
+    fi
+
+    # GitHub ZIPs have a single top-level dir: {repo}-{branch}/
+    local top_dir
+    top_dir=$(find "$_UPS_TMPDIR/unzipped" -mindepth 1 -maxdepth 1 -type d | head -n1)
+    if [[ -z "$top_dir" ]]; then
+      return 1
+    fi
+    mv "$top_dir" "$clone_dir"
+    rm -rf "$_UPS_TMPDIR/unzipped" "$zip_file"
+    return 0
   }
 
   if [[ -n "$branch" ]]; then
@@ -598,21 +623,36 @@ main() {
 
   # Install skills
   local skill_count=0
+  local batch_index=0
 
   if [[ -n "$install_all" ]]; then
     log "Installing all $total_count skills..."
+    local batch_total="$total_count"
     while IFS='|' read -r name path description; do
-      copy_skill "$path" "$dest_skills_dir" "$force"
-      skill_count=$((skill_count + 1))
+      batch_index=$((batch_index + 1))
+      local prefix=""
+      if [[ "$batch_total" -gt 1 ]]; then
+        prefix="[${batch_index}/${batch_total}] "
+      fi
+      if copy_skill "$path" "$dest_skills_dir" "$force" "$prefix"; then
+        skill_count=$((skill_count + 1))
+      fi
     done <"$tmpfile"
   elif [[ ${#selected_skills[@]} -gt 0 ]]; then
-    log "Installing ${#selected_skills[@]} selected skill(s)..."
+    local batch_total="${#selected_skills[@]}"
+    log "Installing $batch_total selected skill(s)..."
     for skill_name in "${selected_skills[@]}"; do
+      batch_index=$((batch_index + 1))
+      local prefix=""
+      if [[ "$batch_total" -gt 1 ]]; then
+        prefix="[${batch_index}/${batch_total}] "
+      fi
       local found=""
       while IFS='|' read -r name path description; do
         if [[ "$name" == "$skill_name" ]]; then
-          copy_skill "$path" "$dest_skills_dir" "$force"
-          skill_count=$((skill_count + 1))
+          if copy_skill "$path" "$dest_skills_dir" "$force" "$prefix"; then
+            skill_count=$((skill_count + 1))
+          fi
           found=1
           break
         fi
