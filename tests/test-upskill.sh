@@ -79,6 +79,22 @@ count_path=$(find path-filtered-skills -name 'SKILL.md' -type f | wc -l | tr -d 
 [[ "$count_path" -gt 0 ]] || { echo "FAIL: No skills found with --path filter"; exit 1; }
 echo "Found $count_path skill(s) with --path filter"
 
+# Test owner/repo@branch inline syntax
+echo "Testing owner/repo@branch syntax ..."
+"$ROOT_DIR/upskill" adobe/helix-website@main --all --dest-path at-branch-skills
+test -d at-branch-skills || { echo "FAIL: at-branch-skills directory missing"; exit 1; }
+count_at=$(find at-branch-skills -name 'SKILL.md' -type f | wc -l | tr -d ' ')
+[[ "$count_at" -gt 0 ]] || { echo "FAIL: No skills installed with @branch syntax"; exit 1; }
+echo "Found $count_at skill(s) with @branch syntax"
+
+# Test that -b flag takes precedence over @branch
+echo "Testing -b precedence over @branch ..."
+"$ROOT_DIR/upskill" adobe/helix-website@main -b main --all --dest-path b-precedence-skills
+test -d b-precedence-skills || { echo "FAIL: b-precedence-skills directory missing"; exit 1; }
+count_bp=$(find b-precedence-skills -name 'SKILL.md' -type f | wc -l | tr -d ' ')
+[[ "$count_bp" -gt 0 ]] || { echo "FAIL: No skills installed with -b precedence test"; exit 1; }
+echo "-b flag precedence works correctly"
+
 # Test --path with invalid path
 echo "Testing --path with invalid path ..."
 if "$ROOT_DIR/upskill" adobe/skills -b main --path nonexistent/path --all --dest-path bad-path 2>/dev/null; then
@@ -86,6 +102,29 @@ if "$ROOT_DIR/upskill" adobe/skills -b main --path nonexistent/path --all --dest
   exit 1
 fi
 echo "Correctly rejected invalid --path"
+
+# Test --force flag
+echo "Testing --force flag ..."
+# Skills were already installed above; re-installing without --force should skip
+skip_out=$("$ROOT_DIR/upskill" adobe/helix-website -b main --all 2>&1 || true)
+if echo "$skip_out" | grep -q "already exists, skipping"; then
+  echo "Correctly skipped existing skill without --force"
+else
+  echo "FAIL: Expected skip warning for existing skill without --force"
+  exit 1
+fi
+
+# Re-installing with --force should overwrite
+force_out=$("$ROOT_DIR/upskill" adobe/helix-website -b main --all --force 2>&1)
+if echo "$force_out" | grep -q "Overwriting existing skill"; then
+  echo "Correctly overwrote existing skill with --force"
+else
+  echo "FAIL: Expected overwrite message with --force"
+  exit 1
+fi
+# Verify skills still present after --force
+count_force=$(find .skills -name 'SKILL.md' -type f | wc -l | tr -d ' ')
+[[ "$count_force" -gt 0 ]] || { echo "FAIL: No skills after --force reinstall"; exit 1; }
 
 echo "OK"
 

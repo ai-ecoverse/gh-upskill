@@ -12,15 +12,17 @@ Install Agent Skills from another GitHub repository.
 Implements the agentskills.io specification: https://agentskills.io
 
 Usage:
-  ${PROGRAM_NAME} [-i] [-g] <owner/repo> [-b <branch>] [--path <subfolder>] [--dest-path <path>] [--list] [--skill <name>] [--all]
+  ${PROGRAM_NAME} [-i] [-g] <owner/repo[@branch]> [-b <branch>] [--path <subfolder>] [--dest-path <path>] [--list] [--skill <name>] [--all]
 
 Examples:
   ${PROGRAM_NAME} anthropics/skills --list
   ${PROGRAM_NAME} anthropics/skills --skill pdf --skill xlsx
   ${PROGRAM_NAME} anthropics/skills --all
+  ${PROGRAM_NAME} anthropics/skills@main --list              # Inline branch
   ${PROGRAM_NAME} -g anthropics/skills --skill pdf  # Install to ~/.skills
   ${PROGRAM_NAME} anthropics/skills --dest-path .claude/skills  # Custom destination
   ${PROGRAM_NAME} adobe/skills --path skills/aem/edge-delivery-services --all  # Subfolder
+  ${PROGRAM_NAME} anthropics/skills --all --force     # Overwrite existing skills
 
 Options:
   -i                        Add created files to .gitignore
@@ -31,12 +33,18 @@ Options:
   --list                    List available skills without installing
   --skill <name>            Install specific skill(s) (can be used multiple times)
   --all                     Install all skills from SKILL.md files
+  --force                   Overwrite existing skill directories
   -q, --quiet               Reduce output
   -h, --help                Show help
   -v, --version             Show version
 
-Note: Skills are discovered by scanning for **/SKILL.md files per the agentskills.io spec.
+Note: You can specify a branch inline with owner/repo@branch syntax.
+      The -b flag takes precedence if both are specified.
+      Skills are discovered by scanning for **/SKILL.md files per the agentskills.io spec.
       Your agent likely already supports this spec natively - this tool may not be needed.
+
+      Downloads repositories as ZIP archives from GitHub (no git/gh required).
+      Falls back to 'gh repo clone' if the ZIP download fails and gh is available.
 USAGE
 }
 
@@ -61,6 +69,98 @@ cleanup() {
   fi
 }
 trap cleanup EXIT
+
+# --- GitHub authentication & HTTP helpers ---
+
+_GITHUB_TOKEN=""
+
+get_github_token() {
+  if [[ -n "$_GITHUB_TOKEN" ]]; then
+    printf '%s' "$_GITHUB_TOKEN"
+    return
+  fi
+  local token=""
+  if command -v gh >/dev/null 2>&1; then
+    token=$(gh auth token 2>/dev/null) || true
+  fi
+  _GITHUB_TOKEN="${token:-}"
+  printf '%s' "$_GITHUB_TOKEN"
+}
+
+github_curl() {
+  # Wrapper around curl that adds GitHub auth headers and returns HTTP status.
+  # Usage: github_curl [-o output_file] <url>
+  # Sets _GITHUB_CURL_STATUS to the HTTP status code.
+  # Sets _GITHUB_CURL_BODY to the response body (unless -o is used).
+  local output_file=""
+  if [[ "${1:-}" == "-o" ]]; then
+    output_file="$2"
+    shift 2
+  fi
+  local url="$1"
+  local token
+  token=$(get_github_token)
+
+  local -a curl_args=(-sS -w '%{http_code}')
+  curl_args+=(-H 'User-Agent: gh-upskill')
+  curl_args+=(-H 'Accept: application/vnd.github+json')
+  if [[ -n "$token" ]]; then
+    curl_args+=(-H "Authorization: Bearer ${token}")
+  fi
+
+  local tmpbody
+  tmpbody=$(mktemp)
+
+  if [[ -n "$output_file" ]]; then
+    # Download to file; capture status from stderr trick
+    _GITHUB_CURL_STATUS=$(curl "${curl_args[@]}" -o "$output_file" "$url" 2>/dev/null) || true
+    _GITHUB_CURL_BODY=""
+  else
+    _GITHUB_CURL_STATUS=$(curl "${curl_args[@]}" -o "$tmpbody" "$url" 2>/dev/null) || true
+    _GITHUB_CURL_BODY=$(cat "$tmpbody")
+  fi
+  rm -f "$tmpbody"
+}
+
+handle_github_error() {
+  # Classify and report GitHub HTTP errors.
+  # $1: HTTP status code
+  # $2: response body (optional)
+  local status="$1"
+  local body="${2:-}"
+  local token
+  token=$(get_github_token)
+
+  case "$status" in
+    429|403)
+      if [[ "$status" == "403" ]] && ! printf '%s' "$body" | grep -qi "rate limit"; then
+        die "GitHub access denied (HTTP 403). Check repository permissions."
+      fi
+      if [[ -z "$token" ]]; then
+        die "GitHub rate-limited anonymous access. This often happens on shared VPNs. Configure a token: gh auth login"
+      else
+        die "GitHub rate-limited access. Retry later."
+      fi
+      ;;
+    401)
+      die "GitHub authentication error (HTTP 401). Your token may be expired. Try: gh auth login"
+      ;;
+    404)
+      die "Repository not found. Check the name and permissions."
+      ;;
+    *)
+      local msg="GitHub request failed (HTTP ${status})."
+      if [[ -n "$body" ]]; then
+        local gh_msg
+        gh_msg=$(printf '%s' "$body" | grep -o '"message":"[^"]*"' | head -1 | sed 's/"message":"//;s/"$//' || true)
+        if [[ -n "$gh_msg" ]]; then
+          msg="${msg} ${gh_msg}"
+        fi
+      fi
+      die "$msg"
+      ;;
+  esac
+}
 
 insert_or_replace_block() {
   # $1: target file
@@ -292,13 +392,25 @@ list_skills() {
 }
 
 copy_skill() {
-  # $1: skill file path, $2: destination skills dir
+  # $1: skill file path, $2: destination skills dir, $3: force flag (optional)
   local skill_file="$1"
   local dest_dir="$2"
+  local force="${3:-}"
   local skill_dir skill_name
 
   skill_dir=$(dirname "$skill_file")
   skill_name=$(basename "$skill_dir")
+
+  # Check if destination already exists
+  if [[ -d "$dest_dir/$skill_name" ]]; then
+    if [[ -n "$force" ]]; then
+      log "Overwriting existing skill: $skill_name"
+      rm -rf "${dest_dir:?}/${skill_name:?}"
+    else
+      log "Warning: Skill $skill_name already exists, skipping (use --force to overwrite)"
+      return 0
+    fi
+  fi
 
   log "Installing skill: $skill_name"
 
@@ -310,12 +422,14 @@ copy_skill() {
 main() {
   local repo=""
   local branch=""
+  local branch_from_ref=""
   local sub_path=""
   local dest_path=""
   local add_to_gitignore=""
   local list_only=""
   local install_all=""
   local global_install=""
+  local force=""
   local -a selected_skills=()
 
   while [[ $# -gt 0 ]]; do
@@ -330,13 +444,25 @@ main() {
       --dest-path) dest_path="$2"; shift 2 ;;
       --list) list_only=1; shift ;;
       --all) install_all=1; shift ;;
+      --force) force=1; shift ;;
       --skill) selected_skills+=("$2"); shift 2 ;;
       -*) die "Unknown option: $1" ;;
-      *) repo="$1"; shift ;;
+      *)
+        if [[ "$1" == *"@"* && "$1" == *"/"* ]]; then
+          repo="${1%%@*}"
+          branch_from_ref="${1#*@}"
+        else
+          repo="$1"
+        fi
+        shift
+        ;;
     esac
   done
 
   [[ -n "$repo" ]] || { usage; die "Missing required <owner/repo>"; }
+
+  # Use inline @branch if -b was not explicitly provided
+  branch="${branch:-$branch_from_ref}"
 
   # Validate mutually exclusive options
   if [[ -n "$list_only" && -n "$install_all" ]]; then
@@ -349,11 +475,9 @@ main() {
     die "--all and --skill are mutually exclusive"
   fi
 
-  require_cmd gh
-  require_cmd git
   require_cmd awk
   require_cmd sed
-  require_cmd tar
+  require_cmd curl
 
   _UPS_TMPDIR=$(mktemp -d)
   log "Created temp dir: $_UPS_TMPDIR"
@@ -361,12 +485,63 @@ main() {
   local clone_dir
   clone_dir="$_UPS_TMPDIR/src"
 
+  # Try ZIP-based download first (no gh/git required)
+  local zip_ok=""
+  local owner_repo="$repo"
+
+  _try_zip_download() {
+    local dl_branch="$1"
+    local zip_url="https://codeload.github.com/${owner_repo}/zip/refs/heads/${dl_branch}"
+    local zip_file="$_UPS_TMPDIR/repo.zip"
+
+    log "Downloading ZIP: $zip_url"
+    if curl -fsSL -o "$zip_file" "$zip_url" 2>/dev/null; then
+      # Unzip and strip top-level directory prefix
+      if command -v unzip >/dev/null 2>&1; then
+        unzip -q "$zip_file" -d "$_UPS_TMPDIR/unzipped" 2>/dev/null || return 1
+      else
+        die "unzip is required for ZIP-based downloads"
+      fi
+
+      # GitHub ZIPs have a single top-level dir: {repo}-{branch}/
+      local top_dir
+      top_dir=$(find "$_UPS_TMPDIR/unzipped" -mindepth 1 -maxdepth 1 -type d | head -n1)
+      if [[ -z "$top_dir" ]]; then
+        return 1
+      fi
+      mv "$top_dir" "$clone_dir"
+      rm -rf "$_UPS_TMPDIR/unzipped" "$zip_file"
+      return 0
+    fi
+    return 1
+  }
+
   if [[ -n "$branch" ]]; then
-    log "Cloning $repo (branch: $branch) ..."
-    gh repo clone "$repo" "$clone_dir" -- -b "$branch" >/dev/null
+    log "Downloading $repo (branch: $branch) as ZIP ..."
+    if _try_zip_download "$branch"; then
+      zip_ok=1
+    fi
   else
-    log "Cloning $repo ..."
-    gh repo clone "$repo" "$clone_dir" >/dev/null
+    log "Downloading $repo as ZIP ..."
+    if _try_zip_download "main"; then
+      zip_ok=1
+    elif _try_zip_download "master"; then
+      zip_ok=1
+    fi
+  fi
+
+  # Fall back to gh repo clone if ZIP download failed
+  if [[ -z "$zip_ok" ]]; then
+    log "ZIP download failed, falling back to gh repo clone ..."
+    require_cmd gh
+    require_cmd git
+    if [[ -n "$branch" ]]; then
+      log "Cloning $repo (branch: $branch) ..."
+      gh repo clone "$repo" "$clone_dir" -- -b "$branch" >/dev/null
+    else
+      log "Cloning $repo ..."
+      gh repo clone "$repo" "$clone_dir" >/dev/null
+    fi
   fi
 
   # Determine search root (optionally restricted to a subfolder)
@@ -427,7 +602,7 @@ main() {
   if [[ -n "$install_all" ]]; then
     log "Installing all $total_count skills..."
     while IFS='|' read -r name path description; do
-      copy_skill "$path" "$dest_skills_dir"
+      copy_skill "$path" "$dest_skills_dir" "$force"
       skill_count=$((skill_count + 1))
     done <"$tmpfile"
   elif [[ ${#selected_skills[@]} -gt 0 ]]; then
@@ -436,7 +611,7 @@ main() {
       local found=""
       while IFS='|' read -r name path description; do
         if [[ "$name" == "$skill_name" ]]; then
-          copy_skill "$path" "$dest_skills_dir"
+          copy_skill "$path" "$dest_skills_dir" "$force"
           skill_count=$((skill_count + 1))
           found=1
           break
