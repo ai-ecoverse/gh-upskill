@@ -142,7 +142,7 @@ echo "upskill list works with installed skills"
 echo "Testing 'upskill list' with no skills ..."
 empty_dir=$(mktemp -d)
 pushd "$empty_dir" >/dev/null
-no_skills_out=$("$ROOT_DIR/upskill" list 2>&1)
+no_skills_out=$(HOME="$empty_dir" "$ROOT_DIR/upskill" list 2>&1)
 echo "$no_skills_out" | grep -q "No local skills found." || { echo "FAIL: empty list message missing"; exit 1; }
 echo "$no_skills_out" | grep -q ".skills/" || { echo "FAIL: empty list hint missing .skills/"; exit 1; }
 popd >/dev/null
