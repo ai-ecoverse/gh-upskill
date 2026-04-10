@@ -13,8 +13,17 @@ Implements the agentskills.io specification: https://agentskills.io
 
 Usage:
   ${PROGRAM_NAME} [-i] [-g] <owner/repo[@branch]> [-b <branch>] [--path <subfolder>] [--dest-path <path>] [--list] [--skill <name>] [--all]
+  ${PROGRAM_NAME} list
+  ${PROGRAM_NAME} info <name>
+  ${PROGRAM_NAME} read <name>
+
+Subcommands:
+  list                          List locally installed/discovered skills
+  info <name>                   Show details about a locally installed skill
+  read <name>                   Print the SKILL.md content of a locally installed skill
 
 Examples:
+  ${PROGRAM_NAME} list                                        # Show local skills
   ${PROGRAM_NAME} anthropics/skills --list
   ${PROGRAM_NAME} anthropics/skills --skill pdf --skill xlsx
   ${PROGRAM_NAME} anthropics/skills --all
@@ -23,6 +32,8 @@ Examples:
   ${PROGRAM_NAME} anthropics/skills --dest-path .claude/skills  # Custom destination
   ${PROGRAM_NAME} adobe/skills --path skills/aem/edge-delivery-services --all  # Subfolder
   ${PROGRAM_NAME} anthropics/skills --all --force     # Overwrite existing skills
+  ${PROGRAM_NAME} info pdf                                   # Show skill details
+  ${PROGRAM_NAME} read pdf                                   # Print SKILL.md content
 
 Options:
   -i                        Add created files to .gitignore
@@ -307,6 +318,95 @@ fi
 SCRIPT
 }
 
+list_local_skills() {
+  # Scan local skill directories and display a table of discovered skills.
+  local -a skill_dirs=(
+    ".skills|project (.skills)"
+    ".claude/skills|legacy (.claude)"
+    ".agents/skills|project (.agents)"
+    "$HOME/.skills|personal (~/.skills)"
+    "$HOME/.claude/skills|legacy (~/.claude)"
+  )
+
+  local -a names=()
+  local -a sources=()
+  local -a paths=()
+  local total=0
+
+  for entry in "${skill_dirs[@]}"; do
+    local dir="${entry%%|*}"
+    local source_label="${entry#*|}"
+    [[ -d "$dir" ]] || continue
+
+    while IFS= read -r -d '' skill_file; do
+      local skill_dir skill_name name=""
+      skill_dir=$(dirname "$skill_file")
+      skill_name=$(basename "$skill_dir")
+
+      # Try to extract name from YAML frontmatter
+      if head -n 1 "$skill_file" | grep -q "^---$"; then
+        local frontmatter
+        frontmatter=$(awk 'BEGIN{inside=0; c=0} /^---$/ {inside=!inside; if(++c==3) exit} inside==1 {print}' "$skill_file")
+        name=$(printf '%s\n' "$frontmatter" | awk '/^name:/ {sub(/^name: */, ""); print}' 2>/dev/null)
+      fi
+
+      # Use directory name as a display path
+      local display_path
+      if [[ "$dir" == "$HOME/"* ]]; then
+        # shellcheck disable=SC2088
+        display_path="~/${dir#"$HOME"/}/$skill_name"
+      else
+        display_path="$dir/$skill_name"
+      fi
+
+      names+=("${name:-$skill_name}")
+      sources+=("$source_label")
+      paths+=("$display_path")
+      total=$((total + 1))
+    done < <(find "$dir" -type f -name 'SKILL.md' -print0 2>/dev/null)
+  done
+
+  if [[ "$total" -eq 0 ]]; then
+    echo "No local skills found."
+    echo ""
+    echo "Skills can be installed to:"
+    echo "  .skills/          Project skills (tracked in repo)"
+    echo "  ~/.skills/        Personal skills (global)"
+    echo "  .claude/skills/   Legacy project skills"
+    echo "  ~/.claude/skills/ Legacy personal skills"
+    echo "  .agents/skills/   Project agent skills"
+    echo ""
+    echo "Install skills with: $PROGRAM_NAME <owner/repo> --all"
+    return 0
+  fi
+
+  # Calculate column widths
+  local max_name=4 max_source=6 max_path=4
+  for ((i = 0; i < total; i++)); do
+    local nl=${#names[$i]} sl=${#sources[$i]} pl=${#paths[$i]}
+    [[ $nl -gt $max_name ]] && max_name=$nl
+    [[ $sl -gt $max_source ]] && max_source=$sl
+    [[ $pl -gt $max_path ]] && max_path=$pl
+  done
+
+  echo "Discoverable local skills:"
+  echo ""
+  # Header
+  printf "  %-${max_name}s  %-${max_source}s  %s\n" "NAME" "SOURCE" "PATH"
+  # Separator line
+  local sep_len=$((max_name + max_source + max_path + 6))
+  printf '  '
+  for ((i = 0; i < sep_len; i++)); do printf '%s' "-"; done
+  printf '\n'
+
+  for ((i = 0; i < total; i++)); do
+    printf "  %-${max_name}s  %-${max_source}s  %s\n" "${names[$i]}" "${sources[$i]}" "${paths[$i]}"
+  done
+
+  echo ""
+  echo "Found $total skill(s)"
+}
+
 copy_tree() {
   # $1: src dir, $2: dest dir
   local src="$1" dest="$2"
@@ -426,7 +526,122 @@ copy_skill() {
   log "${prefix}Installed skill: $skill_name"
 }
 
+find_skill() {
+  # Search for a skill by name across all skill directories.
+  # $1: skill name
+  # Prints the full path to the SKILL.md if found, or nothing.
+  local name="$1"
+  local -a search_dirs=(
+    ".skills/${name}/SKILL.md"
+    "${HOME}/.skills/${name}/SKILL.md"
+    ".claude/skills/${name}/SKILL.md"
+    "${HOME}/.claude/skills/${name}/SKILL.md"
+    ".agents/skills/${name}/SKILL.md"
+  )
+  for path in "${search_dirs[@]}"; do
+    if [[ -f "$path" ]]; then
+      printf '%s' "$path"
+      return 0
+    fi
+  done
+  return 1
+}
+
+skill_source_label() {
+  # Given a SKILL.md path, return a human-readable source label.
+  local path="$1"
+  case "$path" in
+    .skills/*) echo "project (.skills)" ;;
+    .claude/skills/*) echo "project (.claude/skills)" ;;
+    .agents/skills/*) echo "project (.agents/skills)" ;;
+    "${HOME}/.skills/"*) echo "global (~/.skills)" ;;
+    "${HOME}/.claude/skills/"*) echo "global (~/.claude/skills)" ;;
+    *) echo "unknown" ;;
+  esac
+}
+
+extract_frontmatter_field() {
+  # Extract a field value from YAML frontmatter.
+  # $1: file path, $2: field name
+  local file="$1" field="$2"
+  if head -n 1 "$file" | grep -q "^---$"; then
+    awk -v f="$field" '
+      BEGIN{inside=0; c=0}
+      /^---$/ {inside=!inside; if(++c==3) exit; next}
+      inside==1 && $0 ~ "^" f ": " {
+        sub("^" f ": *", "", $0)
+        print
+        exit
+      }
+    ' "$file"
+  fi
+}
+
+cmd_info() {
+  local name="${1:-}"
+  if [[ -z "$name" ]]; then
+    die "Usage: ${PROGRAM_NAME} info <name>"
+  fi
+
+  local skill_path
+  skill_path=$(find_skill "$name") || {
+    printf '%s: skill "%s" not found\n' "$PROGRAM_NAME" "$name" >&2
+    exit 1
+  }
+
+  local skill_dir
+  skill_dir=$(dirname "$skill_path")
+  local display_name description source_label
+  display_name=$(extract_frontmatter_field "$skill_path" "name")
+  description=$(extract_frontmatter_field "$skill_path" "description")
+  source_label=$(skill_source_label "$skill_path")
+
+  echo "Skill: ${display_name:-$name}"
+  echo "Path: ${skill_path}"
+  echo "Source: ${source_label}"
+  if [[ -n "${description:-}" ]]; then
+    echo "Description: ${description}"
+  fi
+  echo ""
+  echo "Contents:"
+  ls -1 "$skill_dir"
+}
+
+cmd_read() {
+  local name="${1:-}"
+  if [[ -z "$name" ]]; then
+    die "Usage: ${PROGRAM_NAME} read <name>"
+  fi
+
+  local skill_path
+  skill_path=$(find_skill "$name") || {
+    printf '%s: skill "%s" not found\n' "$PROGRAM_NAME" "$name" >&2
+    exit 1
+  }
+
+  cat "$skill_path"
+}
+
 main() {
+  # Handle subcommands before flag parsing
+  case "${1:-}" in
+    list)
+      shift
+      list_local_skills "$@"
+      return 0
+      ;;
+    info)
+      shift
+      cmd_info "$@"
+      return 0
+      ;;
+    read)
+      shift
+      cmd_read "$@"
+      return 0
+      ;;
+  esac
+
   local repo=""
   local branch=""
   local branch_from_ref=""

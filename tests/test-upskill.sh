@@ -126,6 +126,99 @@ fi
 count_force=$(find .skills -name 'SKILL.md' -type f | wc -l | tr -d ' ')
 [[ "$count_force" -gt 0 ]] || { echo "FAIL: No skills after --force reinstall"; exit 1; }
 
+# ── upskill list subcommand tests ──
+
+# Test list with skills already installed in .skills/
+echo "Testing 'upskill list' with installed skills ..."
+list_out=$("$ROOT_DIR/upskill" list 2>&1)
+echo "$list_out" | grep -q "Discoverable local skills:" || { echo "FAIL: list header missing"; exit 1; }
+echo "$list_out" | grep -q "NAME" || { echo "FAIL: list table header missing"; exit 1; }
+echo "$list_out" | grep -q "SOURCE" || { echo "FAIL: list SOURCE column missing"; exit 1; }
+echo "$list_out" | grep -q "PATH" || { echo "FAIL: list PATH column missing"; exit 1; }
+echo "$list_out" | grep -q "Found .* skill(s)" || { echo "FAIL: list skill count missing"; exit 1; }
+echo "upskill list works with installed skills"
+
+# Test list with no skills (clean directory)
+echo "Testing 'upskill list' with no skills ..."
+empty_dir=$(mktemp -d)
+pushd "$empty_dir" >/dev/null
+no_skills_out=$("$ROOT_DIR/upskill" list 2>&1)
+echo "$no_skills_out" | grep -q "No local skills found." || { echo "FAIL: empty list message missing"; exit 1; }
+echo "$no_skills_out" | grep -q ".skills/" || { echo "FAIL: empty list hint missing .skills/"; exit 1; }
+popd >/dev/null
+rm -rf "$empty_dir"
+echo "upskill list works with no skills"
+
+# Test that list subcommand is mentioned in help
+echo "Testing help includes list subcommand ..."
+help_out=$("$ROOT_DIR/upskill" --help 2>&1)
+echo "$help_out" | grep -q "list" || { echo "FAIL: help does not mention list subcommand"; exit 1; }
+echo "Help text includes list subcommand"
+
+# Test info and read subcommands
+echo "Testing info subcommand ..."
+# Create a temporary skill with frontmatter
+mkdir -p .skills/test-info-skill
+cat > .skills/test-info-skill/SKILL.md <<'SKILLEOF'
+---
+name: test-info-skill
+description: A test skill for info subcommand
+---
+# Test Info Skill
+
+This is a test skill used for testing the info subcommand.
+SKILLEOF
+
+# Create an extra file to test directory listing
+echo "helper content" > .skills/test-info-skill/helper.txt
+
+info_out=$("$ROOT_DIR/upskill" info test-info-skill)
+echo "$info_out" | grep -q "Skill: test-info-skill" || { echo "FAIL: info missing skill name"; exit 1; }
+echo "$info_out" | grep -q "Path: .skills/test-info-skill/SKILL.md" || { echo "FAIL: info missing path"; exit 1; }
+echo "$info_out" | grep -q "Source: project (.skills)" || { echo "FAIL: info missing source"; exit 1; }
+echo "$info_out" | grep -q "Description: A test skill for info subcommand" || { echo "FAIL: info missing description"; exit 1; }
+echo "$info_out" | grep -q "Contents:" || { echo "FAIL: info missing contents header"; exit 1; }
+echo "$info_out" | grep -q "SKILL.md" || { echo "FAIL: info contents missing SKILL.md"; exit 1; }
+echo "$info_out" | grep -q "helper.txt" || { echo "FAIL: info contents missing helper.txt"; exit 1; }
+echo "info subcommand works correctly"
+
+echo "Testing read subcommand ..."
+read_out=$("$ROOT_DIR/upskill" read test-info-skill)
+echo "$read_out" | grep -q "name: test-info-skill" || { echo "FAIL: read missing frontmatter"; exit 1; }
+echo "$read_out" | grep -q "# Test Info Skill" || { echo "FAIL: read missing heading"; exit 1; }
+echo "$read_out" | grep -q "testing the info subcommand" || { echo "FAIL: read missing body text"; exit 1; }
+echo "read subcommand works correctly"
+
+# Test info/read with nonexistent skill
+echo "Testing info with nonexistent skill ..."
+if "$ROOT_DIR/upskill" info nonexistent-skill-xyz 2>/dev/null; then
+  echo "FAIL: info should fail for nonexistent skill"
+  exit 1
+fi
+echo "Correctly rejected nonexistent skill for info"
+
+echo "Testing read with nonexistent skill ..."
+if "$ROOT_DIR/upskill" read nonexistent-skill-xyz 2>/dev/null; then
+  echo "FAIL: read should fail for nonexistent skill"
+  exit 1
+fi
+echo "Correctly rejected nonexistent skill for read"
+
+# Test info/read without name argument
+echo "Testing info without name ..."
+if "$ROOT_DIR/upskill" info 2>/dev/null; then
+  echo "FAIL: info without name should fail"
+  exit 1
+fi
+echo "Correctly rejected info without name"
+
+echo "Testing read without name ..."
+if "$ROOT_DIR/upskill" read 2>/dev/null; then
+  echo "FAIL: read without name should fail"
+  exit 1
+fi
+echo "Correctly rejected read without name"
+
 echo "OK"
 
 popd >/dev/null
