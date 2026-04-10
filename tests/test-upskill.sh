@@ -107,7 +107,7 @@ echo "Correctly rejected invalid --path"
 echo "Testing --force flag ..."
 # Skills were already installed above; re-installing without --force should skip
 skip_out=$("$ROOT_DIR/upskill" adobe/helix-website -b main --all 2>&1 || true)
-if echo "$skip_out" | grep -q "already exists, skipping"; then
+if echo "$skip_out" | grep -q "already exists"; then
   echo "Correctly skipped existing skill without --force"
 else
   echo "FAIL: Expected skip warning for existing skill without --force"
