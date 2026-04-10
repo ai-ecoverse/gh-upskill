@@ -57,15 +57,15 @@ npx skills add https://github.com/adobe/skills/tree/main/skills/aem/edge-deliver
 
 ### Install skills globally (personal skills)
 
-Use the `-g` or `--global` flag to install skills to `~/.skills` instead of the project's `.skills` directory:
+Use the `-g` or `--global` flag to install skills to `~/.agents/skills` instead of the project's `.agents/skills/` directory:
 
 ```
 upskill -g anthropics/skills --skill pdf --skill xlsx
 ```
 
 When installing globally:
-- Skills are installed to `~/.skills`
-- `.agents/discover-skills` and `AGENTS.md` are not modified (since these are project-specific)
+- Skills are installed to `~/.agents/skills`
+- If `~/.claude/` exists, skills are also installed to `~/.claude/skills/` (see [Claude Code auto-detection](#claude-code-auto-detection))
 
 ### Install to custom destination
 
@@ -75,39 +75,36 @@ Use `--dest-path` to install skills to a custom location:
 upskill anthropics/skills --skill pdf --dest-path .claude/skills
 ```
 
-This is useful for compatibility with tools that expect skills in different locations (e.g., `.claude/skills`).
+This is useful for compatibility with tools that expect skills in different locations. Note that `--dest-path` disables [Claude Code auto-detection](#claude-code-auto-detection).
 
 ### Options
 
 | Option | Description |
 |--------|-------------|
-| `-g, --global` | Install to `~/.skills` (personal skills) |
+| `-g, --global` | Install to `~/.agents/skills` (personal skills) |
 | `-b, --branch <ref>` | Branch, tag, or commit to clone |
 | `-p, --path <subfolder>` | Only discover skills under this subfolder |
 | `--dest-path <path>` | Custom destination path (overrides `-g`) |
 | `--list` | List available skills without installing |
 | `--skill <name>` | Install specific skill(s) (repeatable) |
 | `--all` | Install all discovered skills |
-| `-i` | Add `.skills/` to `.gitignore` |
+| `-i` | Add `.agents/skills/` to `.gitignore` |
 | `-q, --quiet` | Reduce output |
 
 ## How it works
 
 1. Clones the source repository to a temp directory
 2. Scans for all `**/SKILL.md` files (per agentskills.io spec)
-3. Copies selected skill directories to `.skills/` (or custom destination)
-4. Creates `.agents/discover-skills` helper script
-5. Updates `AGENTS.md` with skills section (if source has one)
+3. Copies selected skill directories to `.agents/skills/` (or custom destination)
 
-## Discover installed skills
+### Claude Code auto-detection
 
-After installing, list available skills in your project:
+When `--dest-path` is **not** used, upskill automatically detects Claude Code environments and dual-installs skills:
 
-```
-./.agents/discover-skills
-```
+- **Local installs:** if a `.claude/` directory or `CLAUDE.md` file exists in the project, skills are also installed to `.claude/skills/`
+- **Global installs (`-g`):** if `~/.claude/` exists, skills are also installed to `~/.claude/skills/`
 
-This scans both project skills (`.skills/`) and personal skills (`~/.skills/`), plus legacy `.claude/skills` locations for backwards compatibility.
+Using `--dest-path` disables this auto-detection — skills are only installed to the specified path.
 
 ## Development
 
