@@ -3,40 +3,77 @@ set -Eeo pipefail
 IFS=$'\n\t'
 
 PROGRAM_NAME="upskill"
-VERSION="0.2.0"
+VERSION="0.3.0"
 
 usage() {
   cat <<USAGE
 ${PROGRAM_NAME} ${VERSION}
-Install Agent Skills from another GitHub repository.
+Install Agent Skills from GitHub, ClawHub, or Tessl registries.
 Implements the agentskills.io specification: https://agentskills.io
 
 Usage:
-  ${PROGRAM_NAME} [-i] [-g] <owner/repo> [-b <branch>] [--path <subfolder>] [--dest-path <path>] [--list] [--skill <name>] [--all]
+  ${PROGRAM_NAME} [-i] [-g] <owner/repo[@branch]> [-b <branch>] [--path <subfolder>] [--dest-path <path>] [--list] [--skill <name>] [--all]
+  ${PROGRAM_NAME} list
+  ${PROGRAM_NAME} info <name>
+  ${PROGRAM_NAME} read <name>
+  ${PROGRAM_NAME} clawhub:<slug>
+  ${PROGRAM_NAME} https://clawhub.ai/<user>/<slug>
+  ${PROGRAM_NAME} tessl:<name>
+  ${PROGRAM_NAME} search <query>
+
+Subcommands:
+  list                          List locally installed/discovered skills
+  info <name>                   Show details about a locally installed skill
+  read <name>                   Print the SKILL.md content of a locally installed skill
+  search <query>                Search ClawHub and Tessl skill registries
+
+Install sources:
+  owner/repo[@branch]           GitHub repository (default)
+  clawhub:<slug>                ClawHub skill by slug
+  https://clawhub.ai/u/slug     ClawHub skill by URL
+  tessl:<name>                  Tessl registry skill (resolves to GitHub)
 
 Examples:
+  ${PROGRAM_NAME} search "pdf converter"                      # Search registries
+  ${PROGRAM_NAME} list                                        # Show local skills
   ${PROGRAM_NAME} anthropics/skills --list
   ${PROGRAM_NAME} anthropics/skills --skill pdf --skill xlsx
   ${PROGRAM_NAME} anthropics/skills --all
+  ${PROGRAM_NAME} anthropics/skills@main --list              # Inline branch
   ${PROGRAM_NAME} -g anthropics/skills --skill pdf  # Install to ~/.agents/skills
   ${PROGRAM_NAME} anthropics/skills --dest-path .claude/skills  # Custom destination
   ${PROGRAM_NAME} adobe/skills --path skills/aem/edge-delivery-services --all  # Subfolder
+  ${PROGRAM_NAME} anthropics/skills --all --force     # Overwrite existing skills
+  ${PROGRAM_NAME} clawhub:tavily-search                      # Install from ClawHub
+  ${PROGRAM_NAME} https://clawhub.ai/user/my-skill           # Install from ClawHub URL
+  ${PROGRAM_NAME} tessl:postgres-pro                         # Install from Tessl registry
+  ${PROGRAM_NAME} info pdf                                   # Show skill details
+  ${PROGRAM_NAME} read pdf                                   # Print SKILL.md content
 
 Options:
   -i                        Add created files to .gitignore
   -g, --global              Install skills to ~/.agents/skills (personal skills)
-  -b, --branch <branch>     Branch, tag, or commit to clone (default: repo default)
+  -b, --branch <ref>        Branch, tag, or commit to clone (default: repo default)
   -p, --path <subfolder>    Only discover skills under this subfolder
   --dest-path <path>        Custom destination path for skills (overrides -g)
   --list                    List available skills without installing
   --skill <name>            Install specific skill(s) (can be used multiple times)
   --all                     Install all skills from SKILL.md files
+  --force                   Overwrite existing skill directories
   -q, --quiet               Reduce output
   -h, --help                Show help
   -v, --version             Show version
 
-Note: Skills are discovered by scanning for **/SKILL.md files per the agentskills.io spec.
+Note: You can specify a branch inline with owner/repo@branch syntax.
+      The -b flag takes precedence if both are specified.
+      Skills are discovered by scanning for **/SKILL.md files per the agentskills.io spec.
       Your agent likely already supports this spec natively - this tool may not be needed.
+
+      Downloads repositories as ZIP archives from GitHub (no git/gh required; requires unzip).
+      Falls back to 'gh repo clone' if the ZIP download fails and gh is available.
+
+      Authentication: Uses 'gh auth token' automatically when gh CLI is installed.
+      If you hit rate limits, authenticate with: gh auth login
 USAGE
 }
 
@@ -61,6 +98,98 @@ cleanup() {
   fi
 }
 trap cleanup EXIT
+
+# --- GitHub authentication & HTTP helpers ---
+
+_GITHUB_TOKEN=""
+
+get_github_token() {
+  if [[ -n "$_GITHUB_TOKEN" ]]; then
+    printf '%s' "$_GITHUB_TOKEN"
+    return
+  fi
+  local token=""
+  if command -v gh >/dev/null 2>&1; then
+    token=$(gh auth token 2>/dev/null) || true
+  fi
+  _GITHUB_TOKEN="${token:-}"
+  printf '%s' "$_GITHUB_TOKEN"
+}
+
+github_curl() {
+  # Wrapper around curl that adds GitHub auth headers and returns HTTP status.
+  # Usage: github_curl [-o output_file] <url>
+  # Sets _GITHUB_CURL_STATUS to the HTTP status code.
+  # Sets _GITHUB_CURL_BODY to the response body (unless -o is used).
+  local output_file=""
+  if [[ "${1:-}" == "-o" ]]; then
+    output_file="$2"
+    shift 2
+  fi
+  local url="$1"
+  local token
+  token=$(get_github_token)
+
+  local -a curl_args=(-sS -w '%{http_code}')
+  curl_args+=(-H 'User-Agent: gh-upskill')
+  curl_args+=(-H 'Accept: application/vnd.github+json')
+  if [[ -n "$token" ]]; then
+    curl_args+=(-H "Authorization: Bearer ${token}")
+  fi
+
+  local tmpbody
+  tmpbody=$(mktemp)
+
+  if [[ -n "$output_file" ]]; then
+    # Download to file; capture status from stderr trick
+    _GITHUB_CURL_STATUS=$(curl "${curl_args[@]}" -o "$output_file" "$url" 2>/dev/null) || true
+    _GITHUB_CURL_BODY=""
+  else
+    _GITHUB_CURL_STATUS=$(curl "${curl_args[@]}" -o "$tmpbody" "$url" 2>/dev/null) || true
+    _GITHUB_CURL_BODY=$(cat "$tmpbody")
+  fi
+  rm -f "$tmpbody"
+}
+
+handle_github_error() {
+  # Classify and report GitHub HTTP errors.
+  # $1: HTTP status code
+  # $2: response body (optional)
+  local status="$1"
+  local body="${2:-}"
+  local token
+  token=$(get_github_token)
+
+  case "$status" in
+    429|403)
+      if [[ "$status" == "403" ]] && ! printf '%s' "$body" | grep -qi "rate limit"; then
+        die "GitHub access denied (HTTP 403). Check repository permissions."
+      fi
+      if [[ -z "$token" ]]; then
+        die "GitHub rate-limited anonymous access. This often happens on shared VPNs. Configure a token: gh auth login"
+      else
+        die "GitHub rate-limited access. Retry later."
+      fi
+      ;;
+    401)
+      die "GitHub authentication error (HTTP 401). Your token may be expired. Try: gh auth login"
+      ;;
+    404)
+      die "Repository not found. Check the name and permissions."
+      ;;
+    *)
+      local msg="GitHub request failed (HTTP ${status})."
+      if [[ -n "$body" ]]; then
+        local gh_msg
+        gh_msg=$(printf '%s' "$body" | grep -o '"message":"[^"]*"' | head -1 | sed 's/"message":"//;s/"$//' || true)
+        if [[ -n "$gh_msg" ]]; then
+          msg="${msg} ${gh_msg}"
+        fi
+      fi
+      die "$msg"
+      ;;
+  esac
+}
 
 copy_tree() {
   # $1: src dir, $2: dest dir
@@ -150,30 +279,612 @@ list_skills() {
 }
 
 copy_skill() {
-  # $1: skill file path, $2: destination skills dir
+  # $1: skill file path, $2: destination skills dir, $3: force flag (optional)
+  # $4: progress prefix (optional, e.g. "[1/5] ")
   local skill_file="$1"
   local dest_dir="$2"
+  local force="${3:-}"
+  local prefix="${4:-}"
   local skill_dir skill_name
 
   skill_dir=$(dirname "$skill_file")
   skill_name=$(basename "$skill_dir")
 
-  log "Installing skill: $skill_name"
+  # Check if destination already exists
+  if [[ -d "$dest_dir/$skill_name" ]]; then
+    if [[ -n "$force" ]]; then
+      log "${prefix}Overwriting existing skill: $skill_name"
+      rm -rf "${dest_dir:?}/${skill_name:?}"
+    else
+      log "${prefix}Skipped skill: $skill_name (already exists)"
+      return 1
+    fi
+  fi
+
+  log "${prefix}Installing skill: $skill_name"
 
   # Copy the entire skill directory
   mkdir -p "$dest_dir/$skill_name"
   copy_tree "$skill_dir" "$dest_dir/$skill_name"
+
+  log "${prefix}Installed skill: $skill_name"
+}
+
+list_local_skills() {
+  # Scan local skill directories and display a table of discovered skills.
+  local -a skill_dirs=(
+    ".agents/skills|project (.agents/skills)"
+    ".skills|project (.skills)"
+    ".claude/skills|legacy (.claude)"
+    "$HOME/.agents/skills|personal (~/.agents/skills)"
+    "$HOME/.skills|personal (~/.skills)"
+    "$HOME/.claude/skills|legacy (~/.claude)"
+  )
+
+  local -a names=()
+  local -a sources=()
+  local -a paths=()
+  local total=0
+
+  for entry in "${skill_dirs[@]}"; do
+    local dir="${entry%%|*}"
+    local source_label="${entry#*|}"
+    [[ -d "$dir" ]] || continue
+
+    while IFS= read -r -d '' skill_file; do
+      local skill_dir skill_name name=""
+      skill_dir=$(dirname "$skill_file")
+      skill_name=$(basename "$skill_dir")
+
+      # Try to extract name from YAML frontmatter
+      if head -n 1 "$skill_file" | grep -q "^---$"; then
+        local frontmatter
+        frontmatter=$(awk 'BEGIN{inside=0; c=0} /^---$/ {inside=!inside; if(++c==3) exit} inside==1 {print}' "$skill_file")
+        name=$(printf '%s\n' "$frontmatter" | awk '/^name:/ {sub(/^name: */, ""); print}' 2>/dev/null)
+      fi
+
+      # Use directory name as a display path
+      local display_path
+      if [[ "$dir" == "$HOME/"* ]]; then
+        # shellcheck disable=SC2088
+        display_path="~/${dir#"$HOME"/}/$skill_name"
+      else
+        display_path="$dir/$skill_name"
+      fi
+
+      names+=("${name:-$skill_name}")
+      sources+=("$source_label")
+      paths+=("$display_path")
+      total=$((total + 1))
+    done < <(find "$dir" -type f -name 'SKILL.md' -print0 2>/dev/null)
+  done
+
+  if [[ "$total" -eq 0 ]]; then
+    echo "No local skills found."
+    echo ""
+    echo "Skills can be installed to:"
+    echo "  .agents/skills/   Project skills (tracked in repo)"
+    echo "  ~/.agents/skills/ Personal skills (global)"
+    echo "  .skills/          Legacy project skills"
+    echo "  .claude/skills/   Legacy project skills"
+    echo ""
+    echo "Install skills with: $PROGRAM_NAME <owner/repo> --all"
+    return 0
+  fi
+
+  # Calculate column widths
+  local max_name=4 max_source=6 max_path=4
+  for ((i = 0; i < total; i++)); do
+    local nl=${#names[$i]} sl=${#sources[$i]} pl=${#paths[$i]}
+    [[ $nl -gt $max_name ]] && max_name=$nl
+    [[ $sl -gt $max_source ]] && max_source=$sl
+    [[ $pl -gt $max_path ]] && max_path=$pl
+  done
+
+  echo "Discoverable local skills:"
+  echo ""
+  # Header
+  printf "  %-${max_name}s  %-${max_source}s  %s\n" "NAME" "SOURCE" "PATH"
+  # Separator line
+  local sep_len=$((max_name + max_source + max_path + 6))
+  printf '  '
+  for ((i = 0; i < sep_len; i++)); do printf '%s' "-"; done
+  printf '\n'
+
+  for ((i = 0; i < total; i++)); do
+    printf "  %-${max_name}s  %-${max_source}s  %s\n" "${names[$i]}" "${sources[$i]}" "${paths[$i]}"
+  done
+
+  echo ""
+  echo "Found $total skill(s)"
+}
+
+find_skill() {
+  # Search for a skill by name across all skill directories.
+  # $1: skill name
+  local name="$1"
+  local -a search_dirs=(
+    ".agents/skills/${name}/SKILL.md"
+    ".skills/${name}/SKILL.md"
+    "${HOME}/.agents/skills/${name}/SKILL.md"
+    "${HOME}/.skills/${name}/SKILL.md"
+    ".claude/skills/${name}/SKILL.md"
+    "${HOME}/.claude/skills/${name}/SKILL.md"
+  )
+  for path in "${search_dirs[@]}"; do
+    if [[ -f "$path" ]]; then
+      printf '%s' "$path"
+      return 0
+    fi
+  done
+  return 1
+}
+
+skill_source_label() {
+  # Given a SKILL.md path, return a human-readable source label.
+  local path="$1"
+  case "$path" in
+    .agents/skills/*) echo "project (.agents/skills)" ;;
+    .skills/*) echo "project (.skills)" ;;
+    .claude/skills/*) echo "project (.claude/skills)" ;;
+    "${HOME}/.agents/skills/"*) echo "global (~/.agents/skills)" ;;
+    "${HOME}/.skills/"*) echo "global (~/.skills)" ;;
+    "${HOME}/.claude/skills/"*) echo "global (~/.claude/skills)" ;;
+    *) echo "unknown" ;;
+  esac
+}
+
+extract_frontmatter_field() {
+  # Extract a field value from YAML frontmatter.
+  # $1: file path, $2: field name
+  local file="$1" field="$2"
+  if head -n 1 "$file" | grep -q "^---$"; then
+    awk -v f="$field" '
+      BEGIN{inside=0; c=0}
+      /^---$/ {inside=!inside; if(++c==3) exit; next}
+      inside==1 && $0 ~ "^" f ": " {
+        sub("^" f ": *", "", $0)
+        print
+        exit
+      }
+    ' "$file"
+  fi
+}
+
+cmd_info() {
+  local name="${1:-}"
+  if [[ -z "$name" ]]; then
+    die "Usage: ${PROGRAM_NAME} info <name>"
+  fi
+
+  local skill_path
+  skill_path=$(find_skill "$name") || {
+    printf '%s: skill "%s" not found\n' "$PROGRAM_NAME" "$name" >&2
+    exit 1
+  }
+
+  local skill_dir
+  skill_dir=$(dirname "$skill_path")
+  local display_name description source_label
+  display_name=$(extract_frontmatter_field "$skill_path" "name")
+  description=$(extract_frontmatter_field "$skill_path" "description")
+  source_label=$(skill_source_label "$skill_path")
+
+  echo "Skill: ${display_name:-$name}"
+  echo "Path: ${skill_path}"
+  echo "Source: ${source_label}"
+  if [[ -n "${description:-}" ]]; then
+    echo "Description: ${description}"
+  fi
+  echo ""
+  echo "Contents:"
+  ls -1 "$skill_dir"
+}
+
+cmd_read() {
+  local name="${1:-}"
+  if [[ -z "$name" ]]; then
+    die "Usage: ${PROGRAM_NAME} read <name>"
+  fi
+
+  local skill_path
+  skill_path=$(find_skill "$name") || {
+    printf '%s: skill "%s" not found\n' "$PROGRAM_NAME" "$name" >&2
+    exit 1
+  }
+
+  cat "$skill_path"
+}
+
+is_skill_installed() {
+  # Check if a skill is already installed locally.
+  # $1: skill name
+  local name="$1"
+  local -a dirs=(
+    ".agents/skills/${name}"
+    ".skills/${name}"
+    "${HOME}/.agents/skills/${name}"
+    "${HOME}/.skills/${name}"
+    ".claude/skills/${name}"
+    "${HOME}/.claude/skills/${name}"
+  )
+  for d in "${dirs[@]}"; do
+    if [[ -d "$d" ]]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+install_from_clawhub() {
+  # Install a skill from ClawHub by slug.
+  # $1: slug, $2: dest dir, $3: force flag
+  local slug="$1"
+  local dest_dir="$2"
+  local force="${3:-}"
+
+  require_cmd curl
+
+  # Check if destination already exists
+  if [[ -d "$dest_dir/$slug" ]]; then
+    if [[ -n "$force" ]]; then
+      log "Overwriting existing skill: $slug"
+      rm -rf "${dest_dir:?}/${slug:?}"
+    else
+      log "Skipped skill: $slug (already exists, use --force to overwrite)"
+      return 0
+    fi
+  fi
+
+  _UPS_TMPDIR=$(mktemp -d)
+  log "Downloading from ClawHub: $slug"
+
+  local zip_url="https://wry-manatee-359.convex.site/api/v1/download?slug=${slug}"
+  local zip_file="$_UPS_TMPDIR/clawhub.zip"
+
+  local http_status
+  http_status=$(curl -sS -w '%{http_code}' -o "$zip_file" "$zip_url" 2>/dev/null) || true
+
+  if [[ ! "$http_status" =~ ^2 ]]; then
+    die "ClawHub download failed (HTTP ${http_status}) for slug: $slug"
+  fi
+
+  # Unzip
+  if ! command -v unzip >/dev/null 2>&1; then
+    die "unzip is required for ClawHub downloads"
+  fi
+
+  # Zip-slip protection: list entries and reject path traversal
+  local entries
+  entries=$(unzip -l "$zip_file" 2>/dev/null | awk 'NR>3 && /^[ ]*[0-9]/ {print $NF}') || die "Failed to list ClawHub archive for: $slug"
+  if printf '%s\n' "$entries" | grep -qE '(^|/)\.\.(/|$)'; then
+    die "ClawHub archive contains path traversal entries, refusing to extract: $slug"
+  fi
+
+  unzip -q "$zip_file" -d "$_UPS_TMPDIR/clawhub_unzipped" 2>/dev/null || die "Failed to unzip ClawHub archive for: $slug"
+
+  # Install into dest_dir/slug, skipping _meta.json
+  mkdir -p "$dest_dir/$slug"
+  local src_dir="$_UPS_TMPDIR/clawhub_unzipped"
+
+  # If there's a single top-level directory, descend into it
+  local top_count
+  top_count=$(find "$src_dir" -mindepth 1 -maxdepth 1 | wc -l | tr -d ' ')
+  if [[ "$top_count" -eq 1 ]]; then
+    local single_dir
+    single_dir=$(find "$src_dir" -mindepth 1 -maxdepth 1 -type d | head -n1)
+    if [[ -n "$single_dir" ]]; then
+      src_dir="$single_dir"
+    fi
+  fi
+
+  # Copy files, skipping _meta.json
+  find "$src_dir" -mindepth 1 -maxdepth 1 -not -name '_meta.json' -print0 |
+    while IFS= read -r -d '' item; do
+      cp -R "$item" "$dest_dir/$slug/"
+    done
+
+  log "Installed skill from ClawHub: $slug → $dest_dir/$slug"
+}
+
+resolve_tessl_ref() {
+  # Resolve a Tessl skill name to owner/repo and optional path.
+  # $1: tessl name
+  # Sets: _TESSL_OWNER_REPO, _TESSL_PATH
+  local name="$1"
+
+  require_cmd jq
+  require_cmd curl
+
+  local encoded_name
+  encoded_name=$(printf '%s' "$name" | sed 's/ /%20/g')
+  local api_url="https://api.tessl.io/experimental/search?q=${encoded_name}&contentType=skills&page%5Bsize%5D=5"
+
+  log "Resolving Tessl skill: $name"
+
+  local http_status tmpbody
+  tmpbody=$(mktemp)
+  http_status=$(curl -sS -w '%{http_code}' -o "$tmpbody" "$api_url" 2>/dev/null) || true
+  local body
+  body=$(cat "$tmpbody")
+  rm -f "$tmpbody"
+
+  if [[ ! "$http_status" =~ ^2 ]]; then
+    die "Tessl API request failed (HTTP ${http_status}) for: $name"
+  fi
+
+  # Find exact match by name
+  local source_url skill_path
+  source_url=$(printf '%s' "$body" | jq -r --arg n "$name" '
+    .data[]
+    | select(.attributes.name == $n)
+    | .attributes.sourceUrl // empty
+  ' 2>/dev/null | head -n1)
+
+  if [[ -z "$source_url" ]]; then
+    die "Tessl skill not found: $name"
+  fi
+
+  skill_path=$(printf '%s' "$body" | jq -r --arg n "$name" '
+    .data[]
+    | select(.attributes.name == $n)
+    | .attributes.path // empty
+  ' 2>/dev/null | head -n1)
+
+  # Parse GitHub URL: https://github.com/owner/repo
+  local gh_part
+  gh_part="${source_url#https://github.com/}"
+  # Remove trailing slashes and .git suffix
+  gh_part="${gh_part%.git}"
+  gh_part="${gh_part%/}"
+
+  # Extract owner/repo (first two path segments)
+  _TESSL_OWNER_REPO=$(printf '%s' "$gh_part" | cut -d'/' -f1-2)
+  _TESSL_PATH="${skill_path:-}"
+
+  if [[ -z "$_TESSL_OWNER_REPO" || "$_TESSL_OWNER_REPO" == "/" ]]; then
+    die "Could not parse GitHub URL from Tessl: $source_url"
+  fi
+
+  log "Resolved Tessl skill '$name' → $_TESSL_OWNER_REPO (path: ${_TESSL_PATH:-<root>})"
+}
+
+cmd_search() {
+  local query="${1:-}"
+  if [[ -z "$query" ]]; then
+    die "Usage: ${PROGRAM_NAME} search <query>"
+  fi
+
+  command -v jq >/dev/null 2>&1 || die "jq is required for the search command"
+  require_cmd curl
+
+  local encoded_query
+  encoded_query=$(printf '%s' "$query" | sed 's/ /%20/g; s/!/%21/g; s/#/%23/g; s/&/%26/g; s/+/%2B/g')
+
+  local clawhub_url="https://wry-manatee-359.convex.site/api/v1/search?q=${encoded_query}"
+  local tessl_url="https://api.tessl.io/experimental/search?q=${encoded_query}&contentType=skills&page%5Bsize%5D=20"
+
+  # Query both registries in parallel
+  local clawhub_tmp tessl_tmp
+  clawhub_tmp=$(mktemp)
+  tessl_tmp=$(mktemp)
+
+  local clawhub_status_tmp tessl_status_tmp
+  clawhub_status_tmp=$(mktemp)
+  tessl_status_tmp=$(mktemp)
+
+  (
+    local status
+    status=$(curl -sS -w '%{http_code}' -o "$clawhub_tmp" \
+      -H 'User-Agent: gh-upskill' \
+      -H 'Accept: application/json' \
+      "$clawhub_url" 2>/dev/null) || status="000"
+    printf '%s' "$status" > "$clawhub_status_tmp"
+  ) &
+  local clawhub_pid=$!
+
+  (
+    local status
+    status=$(curl -sS -w '%{http_code}' -o "$tessl_tmp" \
+      -H 'User-Agent: gh-upskill' \
+      -H 'Accept: application/json' \
+      "$tessl_url" 2>/dev/null) || status="000"
+    printf '%s' "$status" > "$tessl_status_tmp"
+  ) &
+  local tessl_pid=$!
+
+  wait "$clawhub_pid" 2>/dev/null || true
+  wait "$tessl_pid" 2>/dev/null || true
+
+  local clawhub_status tessl_status
+  clawhub_status=$(cat "$clawhub_status_tmp")
+  tessl_status=$(cat "$tessl_status_tmp")
+  rm -f "$clawhub_status_tmp" "$tessl_status_tmp"
+
+  local clawhub_ok="" tessl_ok=""
+  local clawhub_warn="" tessl_warn=""
+
+  # Parse ClawHub results
+  local -a ch_names=() ch_summaries=()
+  if [[ "$clawhub_status" =~ ^2 ]]; then
+    clawhub_ok=1
+    local ch_count
+    ch_count=$(jq -r '.results | length' "$clawhub_tmp" 2>/dev/null) || ch_count=0
+    local idx=0
+    while [[ $idx -lt $ch_count ]]; do
+      local slug display summary
+      slug=$(jq -r ".results[$idx].slug // .results[$idx].displayName // \"\"" "$clawhub_tmp" 2>/dev/null)
+      display=$(jq -r ".results[$idx].displayName // .results[$idx].slug // \"\"" "$clawhub_tmp" 2>/dev/null)
+      summary=$(jq -r ".results[$idx].summary // \"\"" "$clawhub_tmp" 2>/dev/null)
+      ch_names+=("${display:-$slug}")
+      ch_summaries+=("$summary")
+      idx=$((idx + 1))
+    done
+  else
+    clawhub_warn="ClawHub registry unavailable (HTTP ${clawhub_status})"
+  fi
+
+  # Parse Tessl results
+  local -a ts_names=() ts_descriptions=() ts_repos=() ts_scores=()
+  if [[ "$tessl_status" =~ ^2 ]]; then
+    tessl_ok=1
+    local ts_count
+    ts_count=$(jq -r '.data | length' "$tessl_tmp" 2>/dev/null) || ts_count=0
+    local idx=0
+    while [[ $idx -lt $ts_count ]]; do
+      local name desc repo score
+      name=$(jq -r ".data[$idx].attributes.name // \"\"" "$tessl_tmp" 2>/dev/null)
+      desc=$(jq -r ".data[$idx].attributes.description // \"\"" "$tessl_tmp" 2>/dev/null)
+      repo=$(jq -r ".data[$idx].attributes.sourceUrl // \"\"" "$tessl_tmp" 2>/dev/null)
+      score=$(jq -r ".data[$idx].attributes.scores.aggregate // \"\"" "$tessl_tmp" 2>/dev/null)
+      # Convert score from decimal to percentage (e.g. 0.85 -> 85)
+      if [[ -n "$score" && "$score" != "null" && "$score" != "" ]]; then
+        score=$(awk "BEGIN {printf \"%.0f\", $score * 100}" 2>/dev/null) || score=""
+      else
+        score=""
+      fi
+      # Extract owner/repo from sourceUrl
+      if [[ "$repo" == *"github.com/"* ]]; then
+        repo=$(printf '%s' "$repo" | sed 's|.*github\.com/||; s|\.git$||; s|/tree/.*||; s|/$||')
+      fi
+      ts_names+=("$name")
+      ts_descriptions+=("$desc")
+      ts_repos+=("$repo")
+      ts_scores+=("$score")
+      idx=$((idx + 1))
+    done
+  else
+    tessl_warn="Tessl registry unavailable (HTTP ${tessl_status})"
+  fi
+
+  rm -f "$clawhub_tmp" "$tessl_tmp"
+
+  # If both failed, error out
+  if [[ -z "$clawhub_ok" && -z "$tessl_ok" ]]; then
+    die "Both registries failed. ${clawhub_warn}. ${tessl_warn}."
+  fi
+
+  # Show warnings for partial failures
+  if [[ -n "$clawhub_warn" ]]; then
+    printf 'Warning: %s\n' "$clawhub_warn" >&2
+  fi
+  if [[ -n "$tessl_warn" ]]; then
+    printf 'Warning: %s\n' "$tessl_warn" >&2
+  fi
+
+  local total=$(( ${#ch_names[@]} + ${#ts_names[@]} ))
+  printf 'Search results for "%s" (%d results):\n\n' "$query" "$total"
+
+  if [[ "$total" -eq 0 ]]; then
+    echo "  No results found."
+    return 0
+  fi
+
+  # Build interleaved output: lead with up to 3 Tessl results, then alternate
+  local -a out_names=() out_scores=() out_sources=() out_repos=() out_descs=()
+
+  local ts_idx=0 ch_idx=0
+  # Lead with up to 3 Tessl results
+  while [[ $ts_idx -lt ${#ts_names[@]} && $ts_idx -lt 3 ]]; do
+    out_names+=("${ts_names[$ts_idx]}")
+    out_scores+=("${ts_scores[$ts_idx]}")
+    out_sources+=("[tessl]")
+    out_repos+=("${ts_repos[$ts_idx]}")
+    out_descs+=("${ts_descriptions[$ts_idx]}")
+    ts_idx=$((ts_idx + 1))
+  done
+
+  # Interleave remaining
+  while [[ $ch_idx -lt ${#ch_names[@]} || $ts_idx -lt ${#ts_names[@]} ]]; do
+    if [[ $ch_idx -lt ${#ch_names[@]} ]]; then
+      out_names+=("${ch_names[$ch_idx]}")
+      out_scores+=("")
+      out_sources+=("[clawhub]")
+      out_repos+=("")
+      out_descs+=("${ch_summaries[$ch_idx]}")
+      ch_idx=$((ch_idx + 1))
+    fi
+    if [[ $ts_idx -lt ${#ts_names[@]} ]]; then
+      out_names+=("${ts_names[$ts_idx]}")
+      out_scores+=("${ts_scores[$ts_idx]}")
+      out_sources+=("[tessl]")
+      out_repos+=("${ts_repos[$ts_idx]}")
+      out_descs+=("${ts_descriptions[$ts_idx]}")
+      ts_idx=$((ts_idx + 1))
+    fi
+  done
+
+  # Calculate column widths
+  local max_name=4 max_score=5 max_source=6 max_repo=4
+  for ((i = 0; i < ${#out_names[@]}; i++)); do
+    local nl=${#out_names[$i]} sl=${#out_scores[$i]} srcl=${#out_sources[$i]} rl=${#out_repos[$i]}
+    [[ $nl -gt $max_name ]] && max_name=$nl
+    [[ $sl -gt $max_score ]] && max_score=$sl
+    [[ $srcl -gt $max_source ]] && max_source=$srcl
+    [[ $rl -gt $max_repo ]] && max_repo=$rl
+  done
+
+  # Header
+  printf "  %-${max_name}s  %-${max_score}s  %-${max_source}s  %s\n" "NAME" "SCORE" "SOURCE" "REPO"
+
+  # Results with descriptions on next line
+  for ((i = 0; i < ${#out_names[@]}; i++)); do
+    printf "  %-${max_name}s  %-${max_score}s  %-${max_source}s  %s\n" \
+      "${out_names[$i]}" "${out_scores[$i]}" "${out_sources[$i]}" "${out_repos[$i]}"
+    if [[ -n "${out_descs[$i]}" ]]; then
+      # Truncate long descriptions
+      local desc="${out_descs[$i]}"
+      if [[ ${#desc} -gt 80 ]]; then
+        desc="${desc:0:77}..."
+      fi
+      printf "    %s\n" "$desc"
+    fi
+  done
+
+  echo ""
+  echo "To install:"
+  echo "  From ClawHub:  ${PROGRAM_NAME} clawhub:<slug>"
+  echo "  From Tessl:    ${PROGRAM_NAME} <owner/repo> --skill <name>"
 }
 
 main() {
+  # Handle subcommands before flag parsing
+  case "${1:-}" in
+    list)
+      shift
+      list_local_skills "$@"
+      return 0
+      ;;
+    info)
+      shift
+      cmd_info "$@"
+      return 0
+      ;;
+    read)
+      shift
+      cmd_read "$@"
+      return 0
+      ;;
+    search)
+      shift
+      cmd_search "$@"
+      return 0
+      ;;
+  esac
+
   local repo=""
   local branch=""
+  local branch_from_ref=""
   local sub_path=""
   local dest_path=""
   local add_to_gitignore=""
   local list_only=""
   local install_all=""
   local global_install=""
+  local force=""
+  local source_type="github"  # github | clawhub | tessl
+  local clawhub_slug=""
+  local tessl_name=""
   local -a selected_skills=()
 
   while [[ $# -gt 0 ]]; do
@@ -188,13 +899,42 @@ main() {
       --dest-path) dest_path="$2"; shift 2 ;;
       --list) list_only=1; shift ;;
       --all) install_all=1; shift ;;
+      --force) force=1; shift ;;
       --skill) selected_skills+=("$2"); shift 2 ;;
       -*) die "Unknown option: $1" ;;
-      *) repo="$1"; shift ;;
+      *)
+        if [[ "$1" == https://clawhub.ai/* ]]; then
+          # ClawHub full URL: https://clawhub.ai/<user>/<slug>
+          source_type="clawhub"
+          clawhub_slug="${1##*/}"
+          repo="$1"
+        elif [[ "$1" == clawhub:* ]]; then
+          # ClawHub shorthand: clawhub:<slug> or clawhub:<user>/<slug>
+          source_type="clawhub"
+          local ch_ref="${1#clawhub:}"
+          # Use the last path segment as the slug
+          clawhub_slug="${ch_ref##*/}"
+          repo="$1"
+        elif [[ "$1" == tessl:* ]]; then
+          # Tessl shorthand: tessl:<name>
+          source_type="tessl"
+          tessl_name="${1#tessl:}"
+          repo="$1"
+        elif [[ "$1" == *"@"* && "$1" == *"/"* ]]; then
+          repo="${1%%@*}"
+          branch_from_ref="${1#*@}"
+        else
+          repo="$1"
+        fi
+        shift
+        ;;
     esac
   done
 
   [[ -n "$repo" ]] || { usage; die "Missing required <owner/repo>"; }
+
+  # Use inline @branch if -b was not explicitly provided
+  branch="${branch:-$branch_from_ref}"
 
   # Validate mutually exclusive options
   if [[ -n "$list_only" && -n "$install_all" ]]; then
@@ -207,11 +947,38 @@ main() {
     die "--all and --skill are mutually exclusive"
   fi
 
-  require_cmd gh
-  require_cmd git
   require_cmd awk
   require_cmd sed
+  require_cmd curl
   require_cmd tar
+
+  # --- ClawHub install path ---
+  if [[ "$source_type" == "clawhub" ]]; then
+    local ch_dest_dir
+    if [[ -n "$dest_path" ]]; then
+      ch_dest_dir="$dest_path"
+    elif [[ -n "$global_install" ]]; then
+      ch_dest_dir="$HOME/.agents/skills"
+    else
+      ch_dest_dir=".agents/skills"
+    fi
+    mkdir -p "$ch_dest_dir"
+    install_from_clawhub "$clawhub_slug" "$ch_dest_dir" "$force"
+    log "Done."
+    return 0
+  fi
+
+  # --- Tessl install path ---
+  if [[ "$source_type" == "tessl" ]]; then
+    resolve_tessl_ref "$tessl_name"
+    # Re-route to GitHub install with resolved owner/repo and path
+    repo="$_TESSL_OWNER_REPO"
+    if [[ -n "$_TESSL_PATH" ]]; then
+      sub_path="$_TESSL_PATH"
+    fi
+    install_all=1
+    log "Installing Tessl skill '$tessl_name' from GitHub: $repo (path: ${sub_path:-<root>})"
+  fi
 
   _UPS_TMPDIR=$(mktemp -d)
   log "Created temp dir: $_UPS_TMPDIR"
@@ -219,12 +986,133 @@ main() {
   local clone_dir
   clone_dir="$_UPS_TMPDIR/src"
 
+  # Try ZIP-based download first (no gh/git required)
+  local zip_ok=""
+  local owner_repo="$repo"
+
+  _try_zip_download() {
+    local dl_ref="$1"
+    # Try refs/heads/ first, then refs/tags/, then raw ref (for commits)
+    local -a url_patterns=(
+      "https://codeload.github.com/${owner_repo}/zip/refs/heads/${dl_ref}"
+      "https://codeload.github.com/${owner_repo}/zip/refs/tags/${dl_ref}"
+      "https://codeload.github.com/${owner_repo}/zip/${dl_ref}"
+    )
+
+    for zip_url in "${url_patterns[@]}"; do
+      local zip_file="$_UPS_TMPDIR/repo.zip"
+
+      log "Downloading ZIP: $zip_url"
+      github_curl -o "$zip_file" "$zip_url"
+
+      # Check for HTTP errors
+      if [[ "$_GITHUB_CURL_STATUS" =~ ^2 ]]; then
+        # Success - proceed to unzip
+        break
+      elif [[ "$_GITHUB_CURL_STATUS" == "404" ]]; then
+        rm -f "$zip_file"
+        continue  # try next URL pattern
+      elif [[ "$_GITHUB_CURL_STATUS" == "429" || "$_GITHUB_CURL_STATUS" == "403" || "$_GITHUB_CURL_STATUS" == "401" ]]; then
+        # Read error body before removing
+        local err_body=""
+        if [[ -f "$zip_file" ]]; then
+          err_body=$(cat "$zip_file")
+        fi
+        rm -f "$zip_file"
+        handle_github_error "$_GITHUB_CURL_STATUS" "$err_body"
+      else
+        rm -f "$zip_file"
+        continue
+      fi
+    done
+
+    # Check if we got a successful download
+    if [[ ! -f "$zip_file" ]] || [[ ! "$_GITHUB_CURL_STATUS" =~ ^2 ]]; then
+      return 1
+    fi
+
+    # Unzip and strip top-level directory prefix
+    if command -v unzip >/dev/null 2>&1; then
+      # Zip-slip protection: check entries before extracting
+      local entries
+      entries=$(unzip -l "$zip_file" 2>/dev/null | awk 'NR>3 && /^[ ]*[0-9]/ {print $NF}') || return 1
+      if printf '%s\n' "$entries" | grep -qE '(^|/)\.\.(/|$)'; then
+        log "Warning: ZIP archive contains path traversal entries, skipping"
+        rm -f "$zip_file"
+        return 1
+      fi
+      unzip -q "$zip_file" -d "$_UPS_TMPDIR/unzipped" 2>/dev/null || return 1
+    else
+      rm -f "$zip_file"
+      if command -v gh >/dev/null 2>&1; then
+        return 1
+      fi
+      die "unzip is required for ZIP-based downloads and gh is not installed for fallback cloning"
+    fi
+
+    # GitHub ZIPs have a single top-level dir: {repo}-{branch}/
+    local top_dir
+    top_dir=$(find "$_UPS_TMPDIR/unzipped" -mindepth 1 -maxdepth 1 -type d | head -n1)
+    if [[ -z "$top_dir" ]]; then
+      return 1
+    fi
+    mv "$top_dir" "$clone_dir"
+    rm -rf "$_UPS_TMPDIR/unzipped" "$zip_file"
+    return 0
+  }
+
+  _resolve_default_branch() {
+    # Use GitHub API to resolve the default branch
+    local api_url="https://api.github.com/repos/${owner_repo}"
+    github_curl "$api_url"
+    if [[ "$_GITHUB_CURL_STATUS" =~ ^2 ]]; then
+      local default_branch
+      default_branch=$(printf '%s' "$_GITHUB_CURL_BODY" | grep -o '"default_branch":"[^"]*"' | head -1 | sed 's/"default_branch":"//;s/"$//')
+      if [[ -n "$default_branch" ]]; then
+        printf '%s' "$default_branch"
+        return 0
+      fi
+    fi
+    return 1
+  }
+
   if [[ -n "$branch" ]]; then
-    log "Cloning $repo (branch: $branch) ..."
-    gh repo clone "$repo" "$clone_dir" -- -b "$branch" --depth 1 >/dev/null
+    log "Downloading $repo (ref: $branch) as ZIP ..."
+    if _try_zip_download "$branch"; then
+      zip_ok=1
+    fi
   else
-    log "Cloning $repo ..."
-    gh repo clone "$repo" "$clone_dir" -- --depth 1 >/dev/null
+    log "Downloading $repo as ZIP ..."
+    # Try to resolve default branch via API first
+    local resolved_branch
+    if resolved_branch=$(_resolve_default_branch); then
+      log "Resolved default branch: $resolved_branch"
+      if _try_zip_download "$resolved_branch"; then
+        zip_ok=1
+      fi
+    fi
+    # Fall back to trying common branch names
+    if [[ -z "$zip_ok" ]]; then
+      if _try_zip_download "main"; then
+        zip_ok=1
+      elif _try_zip_download "master"; then
+        zip_ok=1
+      fi
+    fi
+  fi
+
+  # Fall back to gh repo clone if ZIP download failed
+  if [[ -z "$zip_ok" ]]; then
+    log "ZIP download failed, falling back to gh repo clone ..."
+    require_cmd gh
+    require_cmd git
+    if [[ -n "$branch" ]]; then
+      log "Cloning $repo (branch: $branch) ..."
+      gh repo clone "$repo" "$clone_dir" -- -b "$branch" --depth 1 >/dev/null
+    else
+      log "Cloning $repo ..."
+      gh repo clone "$repo" "$clone_dir" -- --depth 1 >/dev/null
+    fi
   fi
 
   # Determine search root (optionally restricted to a subfolder)
@@ -281,24 +1169,39 @@ main() {
 
   # Install skills
   local skill_count=0
+  local batch_index=0
   local -a installed_skill_names=()
 
   if [[ -n "$install_all" ]]; then
     log "Installing all $total_count skills..."
+    local batch_total="$total_count"
     while IFS='|' read -r name path description; do
-      copy_skill "$path" "$dest_skills_dir"
-      skill_count=$((skill_count + 1))
-      installed_skill_names+=("$(basename "$(dirname "$path")")")
+      batch_index=$((batch_index + 1))
+      local prefix=""
+      if [[ "$batch_total" -gt 1 ]]; then
+        prefix="[${batch_index}/${batch_total}] "
+      fi
+      if copy_skill "$path" "$dest_skills_dir" "$force" "$prefix"; then
+        skill_count=$((skill_count + 1))
+        installed_skill_names+=("$(basename "$(dirname "$path")")")
+      fi
     done <"$tmpfile"
   elif [[ ${#selected_skills[@]} -gt 0 ]]; then
-    log "Installing ${#selected_skills[@]} selected skill(s)..."
+    local batch_total="${#selected_skills[@]}"
+    log "Installing $batch_total selected skill(s)..."
     for skill_name in "${selected_skills[@]}"; do
+      batch_index=$((batch_index + 1))
+      local prefix=""
+      if [[ "$batch_total" -gt 1 ]]; then
+        prefix="[${batch_index}/${batch_total}] "
+      fi
       local found=""
       while IFS='|' read -r name path description; do
         if [[ "$name" == "$skill_name" ]]; then
-          copy_skill "$path" "$dest_skills_dir"
-          skill_count=$((skill_count + 1))
-          installed_skill_names+=("$(basename "$(dirname "$path")")")
+          if copy_skill "$path" "$dest_skills_dir" "$force" "$prefix"; then
+            skill_count=$((skill_count + 1))
+            installed_skill_names+=("$(basename "$(dirname "$path")")")
+          fi
           found=1
           break
         fi

@@ -40,6 +40,43 @@ upskill anthropics/skills --skill pdf --skill xlsx
 upskill anthropics/skills --all
 ```
 
+**Overwrite existing skills:**
+```
+upskill anthropics/skills --all --force
+```
+
+### Subcommands
+
+| Subcommand | Description |
+|------------|-------------|
+| `list` | List locally installed/discovered skills |
+| `info <name>` | Show details about a locally installed skill |
+| `read <name>` | Print the SKILL.md content of a locally installed skill |
+| `search <query>` | Search ClawHub and Tessl skill registries |
+
+```
+upskill list                        # Show local skills
+upskill info pdf                    # Show skill details
+upskill read pdf                    # Print SKILL.md content
+upskill search "pdf converter"      # Search registries
+```
+
+### Install sources
+
+Besides GitHub repositories, skills can be installed from ClawHub and Tessl registries:
+
+```
+upskill clawhub:tavily-search                # Install from ClawHub by slug
+upskill https://clawhub.ai/user/my-skill     # Install from ClawHub by URL
+upskill tessl:postgres-pro                   # Install from Tessl registry
+```
+
+The `owner/repo@branch` inline syntax is also supported (the `-b` flag takes precedence if both are specified):
+
+```
+upskill anthropics/skills@main --list
+```
+
 ### Filter by subfolder
 
 Use `-p` or `--path` to restrict skill discovery to a subfolder within the repository. This is useful for repos that organize skills in nested directories:
@@ -88,14 +125,18 @@ This is useful for compatibility with tools that expect skills in different loca
 | `--list` | List available skills without installing |
 | `--skill <name>` | Install specific skill(s) (repeatable) |
 | `--all` | Install all discovered skills |
+| `--force` | Overwrite existing skill directories |
 | `-i` | Add `.agents/skills/` to `.gitignore` |
 | `-q, --quiet` | Reduce output |
 
 ## How it works
 
-1. Clones the source repository to a temp directory
-2. Scans for all `**/SKILL.md` files (per agentskills.io spec)
-3. Copies selected skill directories to `.agents/skills/` (or custom destination)
+1. Downloads the source repository as a ZIP archive from GitHub (no `git` required; ZIP installs require `unzip`, but not the `gh` CLI)
+2. Falls back to `gh repo clone` if the ZIP path cannot be used and `gh` is available
+3. Scans for all `**/SKILL.md` files (per agentskills.io spec)
+4. Copies selected skill directories to `.agents/skills/` (or custom destination)
+
+ZIP-based installs work without `gh`, but require `unzip`. When the `gh` CLI is installed, authentication can be handled automatically via `gh auth token`, and `gh repo clone` may be used as a fallback if the ZIP path fails. If you hit GitHub API rate limits, authenticate with `gh auth login`.
 
 ### Claude Code auto-detection
 
@@ -119,3 +160,7 @@ Part of the **[AI Ecoverse](https://github.com/ai-ecoverse/.github)** - tools fo
 - [ai-aligned-git](https://github.com/ai-ecoverse/ai-aligned-git) - Git wrapper for safe AI commit practices
 - [ai-aligned-gh](https://github.com/ai-ecoverse/ai-aligned-gh) - GitHub CLI wrapper for proper AI attribution
 - [vibe-coded-badge-action](https://github.com/ai-ecoverse/vibe-coded-badge-action) - Badge showing AI-generated code percentage
+
+## Acknowledgments
+
+Several features in this release were inspired by the upskill implementation in [slicc](https://github.com/ai-ecoverse/slicc), including registry search, ClawHub/Tessl integration, and ZIP-based installs.
