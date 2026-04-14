@@ -3,7 +3,7 @@ set -Eeo pipefail
 IFS=$'\n\t'
 
 PROGRAM_NAME="upskill"
-VERSION="0.2.0"
+VERSION="0.3.0"
 
 usage() {
   cat <<USAGE
