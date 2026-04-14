@@ -3,7 +3,7 @@ set -Eeo pipefail
 IFS=$'\n\t'
 
 PROGRAM_NAME="upskill"
-VERSION="0.1.0"
+VERSION="0.2.0"
 
 usage() {
   cat <<USAGE
@@ -20,15 +20,12 @@ Usage:
   ${PROGRAM_NAME} https://clawhub.ai/<user>/<slug>
   ${PROGRAM_NAME} tessl:<name>
   ${PROGRAM_NAME} search <query>
-  ${PROGRAM_NAME} recommendations [--install]
 
 Subcommands:
   list                          List locally installed/discovered skills
   info <name>                   Show details about a locally installed skill
   read <name>                   Print the SKILL.md content of a locally installed skill
   search <query>                Search ClawHub and Tessl skill registries
-  recommendations               Recommend skills based on your profile
-  recommendations --install     Install all recommended skills
 
 Install sources:
   owner/repo[@branch]           GitHub repository (default)
@@ -38,13 +35,12 @@ Install sources:
 
 Examples:
   ${PROGRAM_NAME} search "pdf converter"                      # Search registries
-  ${PROGRAM_NAME} recommendations                             # Show recommendations
   ${PROGRAM_NAME} list                                        # Show local skills
   ${PROGRAM_NAME} anthropics/skills --list
   ${PROGRAM_NAME} anthropics/skills --skill pdf --skill xlsx
   ${PROGRAM_NAME} anthropics/skills --all
   ${PROGRAM_NAME} anthropics/skills@main --list              # Inline branch
-  ${PROGRAM_NAME} -g anthropics/skills --skill pdf  # Install to ~/.skills
+  ${PROGRAM_NAME} -g anthropics/skills --skill pdf  # Install to ~/.agents/skills
   ${PROGRAM_NAME} anthropics/skills --dest-path .claude/skills  # Custom destination
   ${PROGRAM_NAME} adobe/skills --path skills/aem/edge-delivery-services --all  # Subfolder
   ${PROGRAM_NAME} anthropics/skills --all --force     # Overwrite existing skills
@@ -56,8 +52,8 @@ Examples:
 
 Options:
   -i                        Add created files to .gitignore
-  -g, --global              Install skills to ~/.skills (personal skills)
-  -b, --branch <branch>     Branch, tag, or commit to clone (default: repo default)
+  -g, --global              Install skills to ~/.agents/skills (personal skills)
+  -b, --branch <ref>        Branch, tag, or commit to clone (default: repo default)
   -p, --path <subfolder>    Only discover skills under this subfolder
   --dest-path <path>        Custom destination path for skills (overrides -g)
   --list                    List available skills without installing
@@ -73,7 +69,7 @@ Note: You can specify a branch inline with owner/repo@branch syntax.
       Skills are discovered by scanning for **/SKILL.md files per the agentskills.io spec.
       Your agent likely already supports this spec natively - this tool may not be needed.
 
-      Downloads repositories as ZIP archives from GitHub (no git/gh required).
+      Downloads repositories as ZIP archives from GitHub (no git/gh required; requires unzip).
       Falls back to 'gh repo clone' if the ZIP download fails and gh is available.
 
       Authentication: Uses 'gh auth token' automatically when gh CLI is installed.
@@ -195,237 +191,6 @@ handle_github_error() {
   esac
 }
 
-insert_or_replace_block() {
-  # $1: target file
-  # $2: start marker
-  # $3: end marker
-  # stdin: block content (without markers)
-  local file="$1"; shift
-  local start_marker="$1"; shift
-  local end_marker="$1"; shift
-
-  local block tmp blockfile
-  block=$(cat)
-
-  if [[ ! -f "$file" ]]; then
-    printf '%s\n\n%s\n%s\n%s\n' "# AGENTS.md" "$start_marker" "$block" "$end_marker" >"$file"
-    return 0
-  fi
-
-  if grep -qF "$start_marker" "$file" && grep -qF "$end_marker" "$file"; then
-    tmp=$(mktemp)
-    blockfile=$(mktemp)
-    printf '%s\n' "$block" >"$blockfile"
-    awk -v start="$start_marker" -v end="$end_marker" -v fblock="$blockfile" '
-      BEGIN{skip=0}
-      $0 ~ start {
-        print $0
-        # print replacement content
-        cmd = "cat " fblock
-        while ((cmd | getline line) > 0) print line
-        close(cmd)
-        skip=1
-        next
-      }
-      $0 ~ end && skip==1 { print $0; skip=0; next }
-      skip==1 { next }
-      { print $0 }
-    ' "$file" >"$tmp"
-    mv "$tmp" "$file"
-    rm -f "$blockfile"
-  else
-    {
-      printf '\n%s\n' "$start_marker"
-      printf '%s\n' "$block"
-      printf '%s\n' "$end_marker"
-    } >>"$file"
-  fi
-}
-
-generate_discover_skills() {
-  cat <<'SCRIPT'
-#!/usr/bin/env bash
-set -Eo pipefail
-IFS=$'\n\t'
-
-# Discover available skills in both project and global directories
-# Usage: .agents/discover-skills
-
-PROJECT_SKILLS_DIR=".skills"
-PROJECT_SKILLS_DIR_LEGACY=".claude/skills"
-GLOBAL_SKILLS_DIR="$HOME/.skills"
-GLOBAL_SKILLS_DIR_LEGACY="$HOME/.claude/skills"
-
-process_skills_directory() {
-  local skills_dir="$1"
-  local location_label="$2"
-
-  if [[ ! -d "$skills_dir" ]]; then
-    return 0
-  fi
-
-  local count=0
-  # Count skills first
-  while IFS= read -r -d '' skill_file; do
-    count=$((count + 1))
-  done < <(find "$skills_dir" -type f -name 'SKILL.md' -print0)
-
-  if [[ $count -eq 0 ]]; then
-    return 0
-  fi
-
-  echo "$location_label ($count skill(s)):"
-  # Generate underline matching label length
-  local len=${#location_label}
-  if [[ $len -gt 0 ]]; then
-    local underline=""
-    for ((i=0; i<len; i++)); do
-      underline+="="
-    done
-    echo "$underline"
-  fi
-  echo ""
-
-  # Iterate SKILL.md files robustly (handles spaces)
-  while IFS= read -r -d '' skill_file; do
-    skill_dir=$(dirname "$skill_file")
-    skill_name=$(basename "$skill_dir")
-
-    # Check for YAML frontmatter
-    if head -n 1 "$skill_file" | grep -q "^---$"; then
-      # Extract lines between first pair of --- delimiters
-      frontmatter=$(awk 'BEGIN{inside=0; c=0} /^---$/ {inside=!inside; if(++c==3) exit} inside==1 {print}' "$skill_file")
-      name=$(printf '%s\n' "$frontmatter" | awk -F': *' '/^name:/ {sub(/^name: */,"",$0); print substr($0, index($0,$2))}' 2>/dev/null)
-      description=$(printf '%s\n' "$frontmatter" | awk -F': *' '/^description:/ {sub(/^description: */,"",$0); print substr($0, index($0,$2))}' 2>/dev/null)
-
-      echo "Skill: ${name:-$skill_name}"
-      echo "Path: $skill_file"
-      if [[ -n "$description" ]]; then
-        echo "Description: $description"
-      fi
-    else
-      echo "Skill: $skill_name"
-      echo "Path: $skill_file"
-      echo "Description:"
-      head -n 5 "$skill_file"
-    fi
-
-    echo ""
-    echo "---"
-    echo ""
-  done < <(find "$skills_dir" -type f -name 'SKILL.md' -print0)
-}
-
-echo "Available Skills:"
-echo "=================="
-echo ""
-
-# Check project skills (new location first, then legacy)
-process_skills_directory "$PROJECT_SKILLS_DIR" "Project Skills (.skills)"
-process_skills_directory "$PROJECT_SKILLS_DIR_LEGACY" "Project Skills (.claude/skills - legacy)"
-
-# Check global skills (new location first, then legacy)
-process_skills_directory "$GLOBAL_SKILLS_DIR" "Personal Skills (~/.skills)"
-process_skills_directory "$GLOBAL_SKILLS_DIR_LEGACY" "Personal Skills (~/.claude/skills - legacy)"
-
-# If no skills found at all
-if [[ ! -d "$PROJECT_SKILLS_DIR" && ! -d "$PROJECT_SKILLS_DIR_LEGACY" && ! -d "$GLOBAL_SKILLS_DIR" && ! -d "$GLOBAL_SKILLS_DIR_LEGACY" ]]; then
-  echo "No skills directories found."
-  echo "- Project skills: $PROJECT_SKILLS_DIR (or $PROJECT_SKILLS_DIR_LEGACY)"
-  echo "- Personal skills: $GLOBAL_SKILLS_DIR (or $GLOBAL_SKILLS_DIR_LEGACY)"
-fi
-SCRIPT
-}
-
-list_local_skills() {
-  # Scan local skill directories and display a table of discovered skills.
-  local -a skill_dirs=(
-    ".skills|project (.skills)"
-    ".claude/skills|legacy (.claude)"
-    ".agents/skills|project (.agents)"
-    "$HOME/.skills|personal (~/.skills)"
-    "$HOME/.claude/skills|legacy (~/.claude)"
-  )
-
-  local -a names=()
-  local -a sources=()
-  local -a paths=()
-  local total=0
-
-  for entry in "${skill_dirs[@]}"; do
-    local dir="${entry%%|*}"
-    local source_label="${entry#*|}"
-    [[ -d "$dir" ]] || continue
-
-    while IFS= read -r -d '' skill_file; do
-      local skill_dir skill_name name=""
-      skill_dir=$(dirname "$skill_file")
-      skill_name=$(basename "$skill_dir")
-
-      # Try to extract name from YAML frontmatter
-      if head -n 1 "$skill_file" | grep -q "^---$"; then
-        local frontmatter
-        frontmatter=$(awk 'BEGIN{inside=0; c=0} /^---$/ {inside=!inside; if(++c==3) exit} inside==1 {print}' "$skill_file")
-        name=$(printf '%s\n' "$frontmatter" | awk '/^name:/ {sub(/^name: */, ""); print}' 2>/dev/null)
-      fi
-
-      # Use directory name as a display path
-      local display_path
-      if [[ "$dir" == "$HOME/"* ]]; then
-        # shellcheck disable=SC2088
-        display_path="~/${dir#"$HOME"/}/$skill_name"
-      else
-        display_path="$dir/$skill_name"
-      fi
-
-      names+=("${name:-$skill_name}")
-      sources+=("$source_label")
-      paths+=("$display_path")
-      total=$((total + 1))
-    done < <(find "$dir" -type f -name 'SKILL.md' -print0 2>/dev/null)
-  done
-
-  if [[ "$total" -eq 0 ]]; then
-    echo "No local skills found."
-    echo ""
-    echo "Skills can be installed to:"
-    echo "  .skills/          Project skills (tracked in repo)"
-    echo "  ~/.skills/        Personal skills (global)"
-    echo "  .claude/skills/   Legacy project skills"
-    echo "  ~/.claude/skills/ Legacy personal skills"
-    echo "  .agents/skills/   Project agent skills"
-    echo ""
-    echo "Install skills with: $PROGRAM_NAME <owner/repo> --all"
-    return 0
-  fi
-
-  # Calculate column widths
-  local max_name=4 max_source=6 max_path=4
-  for ((i = 0; i < total; i++)); do
-    local nl=${#names[$i]} sl=${#sources[$i]} pl=${#paths[$i]}
-    [[ $nl -gt $max_name ]] && max_name=$nl
-    [[ $sl -gt $max_source ]] && max_source=$sl
-    [[ $pl -gt $max_path ]] && max_path=$pl
-  done
-
-  echo "Discoverable local skills:"
-  echo ""
-  # Header
-  printf "  %-${max_name}s  %-${max_source}s  %s\n" "NAME" "SOURCE" "PATH"
-  # Separator line
-  local sep_len=$((max_name + max_source + max_path + 6))
-  printf '  '
-  for ((i = 0; i < sep_len; i++)); do printf '%s' "-"; done
-  printf '\n'
-
-  for ((i = 0; i < total; i++)); do
-    printf "  %-${max_name}s  %-${max_source}s  %s\n" "${names[$i]}" "${sources[$i]}" "${paths[$i]}"
-  done
-
-  echo ""
-  echo "Found $total skill(s)"
-}
-
 copy_tree() {
   # $1: src dir, $2: dest dir
   local src="$1" dest="$2"
@@ -545,17 +310,106 @@ copy_skill() {
   log "${prefix}Installed skill: $skill_name"
 }
 
+list_local_skills() {
+  # Scan local skill directories and display a table of discovered skills.
+  local -a skill_dirs=(
+    ".agents/skills|project (.agents/skills)"
+    ".skills|project (.skills)"
+    ".claude/skills|legacy (.claude)"
+    "$HOME/.agents/skills|personal (~/.agents/skills)"
+    "$HOME/.skills|personal (~/.skills)"
+    "$HOME/.claude/skills|legacy (~/.claude)"
+  )
+
+  local -a names=()
+  local -a sources=()
+  local -a paths=()
+  local total=0
+
+  for entry in "${skill_dirs[@]}"; do
+    local dir="${entry%%|*}"
+    local source_label="${entry#*|}"
+    [[ -d "$dir" ]] || continue
+
+    while IFS= read -r -d '' skill_file; do
+      local skill_dir skill_name name=""
+      skill_dir=$(dirname "$skill_file")
+      skill_name=$(basename "$skill_dir")
+
+      # Try to extract name from YAML frontmatter
+      if head -n 1 "$skill_file" | grep -q "^---$"; then
+        local frontmatter
+        frontmatter=$(awk 'BEGIN{inside=0; c=0} /^---$/ {inside=!inside; if(++c==3) exit} inside==1 {print}' "$skill_file")
+        name=$(printf '%s\n' "$frontmatter" | awk '/^name:/ {sub(/^name: */, ""); print}' 2>/dev/null)
+      fi
+
+      # Use directory name as a display path
+      local display_path
+      if [[ "$dir" == "$HOME/"* ]]; then
+        # shellcheck disable=SC2088
+        display_path="~/${dir#"$HOME"/}/$skill_name"
+      else
+        display_path="$dir/$skill_name"
+      fi
+
+      names+=("${name:-$skill_name}")
+      sources+=("$source_label")
+      paths+=("$display_path")
+      total=$((total + 1))
+    done < <(find "$dir" -type f -name 'SKILL.md' -print0 2>/dev/null)
+  done
+
+  if [[ "$total" -eq 0 ]]; then
+    echo "No local skills found."
+    echo ""
+    echo "Skills can be installed to:"
+    echo "  .agents/skills/   Project skills (tracked in repo)"
+    echo "  ~/.agents/skills/ Personal skills (global)"
+    echo "  .skills/          Legacy project skills"
+    echo "  .claude/skills/   Legacy project skills"
+    echo ""
+    echo "Install skills with: $PROGRAM_NAME <owner/repo> --all"
+    return 0
+  fi
+
+  # Calculate column widths
+  local max_name=4 max_source=6 max_path=4
+  for ((i = 0; i < total; i++)); do
+    local nl=${#names[$i]} sl=${#sources[$i]} pl=${#paths[$i]}
+    [[ $nl -gt $max_name ]] && max_name=$nl
+    [[ $sl -gt $max_source ]] && max_source=$sl
+    [[ $pl -gt $max_path ]] && max_path=$pl
+  done
+
+  echo "Discoverable local skills:"
+  echo ""
+  # Header
+  printf "  %-${max_name}s  %-${max_source}s  %s\n" "NAME" "SOURCE" "PATH"
+  # Separator line
+  local sep_len=$((max_name + max_source + max_path + 6))
+  printf '  '
+  for ((i = 0; i < sep_len; i++)); do printf '%s' "-"; done
+  printf '\n'
+
+  for ((i = 0; i < total; i++)); do
+    printf "  %-${max_name}s  %-${max_source}s  %s\n" "${names[$i]}" "${sources[$i]}" "${paths[$i]}"
+  done
+
+  echo ""
+  echo "Found $total skill(s)"
+}
+
 find_skill() {
   # Search for a skill by name across all skill directories.
   # $1: skill name
-  # Prints the full path to the SKILL.md if found, or nothing.
   local name="$1"
   local -a search_dirs=(
+    ".agents/skills/${name}/SKILL.md"
     ".skills/${name}/SKILL.md"
+    "${HOME}/.agents/skills/${name}/SKILL.md"
     "${HOME}/.skills/${name}/SKILL.md"
     ".claude/skills/${name}/SKILL.md"
     "${HOME}/.claude/skills/${name}/SKILL.md"
-    ".agents/skills/${name}/SKILL.md"
   )
   for path in "${search_dirs[@]}"; do
     if [[ -f "$path" ]]; then
@@ -570,9 +424,10 @@ skill_source_label() {
   # Given a SKILL.md path, return a human-readable source label.
   local path="$1"
   case "$path" in
+    .agents/skills/*) echo "project (.agents/skills)" ;;
     .skills/*) echo "project (.skills)" ;;
     .claude/skills/*) echo "project (.claude/skills)" ;;
-    .agents/skills/*) echo "project (.agents/skills)" ;;
+    "${HOME}/.agents/skills/"*) echo "global (~/.agents/skills)" ;;
     "${HOME}/.skills/"*) echo "global (~/.skills)" ;;
     "${HOME}/.claude/skills/"*) echo "global (~/.claude/skills)" ;;
     *) echo "unknown" ;;
@@ -646,11 +501,12 @@ is_skill_installed() {
   # $1: skill name
   local name="$1"
   local -a dirs=(
+    ".agents/skills/${name}"
     ".skills/${name}"
+    "${HOME}/.agents/skills/${name}"
     "${HOME}/.skills/${name}"
     ".claude/skills/${name}"
     "${HOME}/.claude/skills/${name}"
-    ".agents/skills/${name}"
   )
   for d in "${dirs[@]}"; do
     if [[ -d "$d" ]]; then
@@ -660,211 +516,6 @@ is_skill_installed() {
   return 1
 }
 
-load_user_profile() {
-  # Find and load user profile. Sets PROFILE_* variables.
-  # Returns 1 if no profile found.
-  local profile_file=""
-  if [[ -f ".upskill-profile.json" ]]; then
-    profile_file=".upskill-profile.json"
-  elif [[ -f "${HOME}/.upskill-profile.json" ]]; then
-    profile_file="${HOME}/.upskill-profile.json"
-  fi
-
-  if [[ -z "$profile_file" ]]; then
-    return 1
-  fi
-
-  PROFILE_PURPOSE=$(jq -r '.purpose // ""' "$profile_file")
-  PROFILE_ROLE=$(jq -r '.role // ""' "$profile_file")
-  # Arrays as comma-separated strings
-  PROFILE_TASKS=$(jq -r '(.tasks // []) | join(",")' "$profile_file")
-  PROFILE_APPS=$(jq -r '(.apps // []) | join(",")' "$profile_file")
-  return 0
-}
-
-score_catalog() {
-  # Read catalog JSON from stdin and score against profile.
-  # Outputs: score|name|displayName|description|repo|path|skill|matchDetail
-  # Filters out score==0 and already-installed skills.
-  jq -r --arg p_apps "$PROFILE_APPS" \
-         --arg p_tasks "$PROFILE_TASKS" \
-         --arg p_role "$PROFILE_ROLE" \
-         --arg p_purpose "$PROFILE_PURPOSE" '
-    .data[] |
-    . as $item |
-
-    # Split profile values
-    ($p_apps | split(",") | map(select(. != ""))) as $pa |
-    ($p_tasks | split(",") | map(select(. != ""))) as $pt |
-
-    # Split item values
-    (($item.apps // "") | split(",") | map(select(. != ""))) as $ia |
-    (($item.tasks // "") | split(",") | map(select(. != ""))) as $it |
-
-    # Compute matches
-    ([$pa[] | select(. as $a | $ia | index($a))] ) as $app_matches |
-    ([$pt[] | select(. as $t | $it | index($t))] ) as $task_matches |
-
-    (if ($item.role // "") == $p_role and $p_role != "" then 1 else 0 end) as $role_match |
-    (if ($item.purpose // "") == $p_purpose and $p_purpose != "" then 1 else 0 end) as $purpose_match |
-
-    # Score
-    (($app_matches | length) * 3 +
-     ($task_matches | length) * 2 +
-     $role_match +
-     $purpose_match) as $raw_score |
-
-    # Boost
-    (($item.boost // $item.priority // "1") | tonumber) as $boost |
-    (($raw_score * $boost) | floor) as $score |
-
-    # Match detail string
-    (
-      ([$app_matches[] | "apps(" + . + ")"] +
-       [$task_matches[] | "tasks(" + . + ")"] +
-       (if $role_match == 1 then ["role(" + $p_role + ")"] else [] end) +
-       (if $purpose_match == 1 then ["purpose(" + $p_purpose + ")"] else [] end)
-      ) | join(", ")
-    ) as $match_detail |
-
-    select($score > 0) |
-    [($score | tostring),
-     ($item.name // ""),
-     ($item.displayName // $item.name // ""),
-     ($item.description // ""),
-     ($item.repo // ""),
-     ($item.path // ""),
-     ($item.skill // ""),
-     $match_detail
-    ] | join("|")
-  ' | sort -t'|' -k1 -rn
-}
-
-cmd_recommendations() {
-  local do_install=""
-  while [[ $# -gt 0 ]]; do
-    case "$1" in
-      --install) do_install=1; shift ;;
-      *) die "Unknown option for recommendations: $1" ;;
-    esac
-  done
-
-  require_cmd jq
-  require_cmd curl
-
-  # Load user profile
-  if ! load_user_profile; then
-    echo "No user profile found." >&2
-    echo "" >&2
-    echo "Create a profile at .upskill-profile.json or ~/.upskill-profile.json:" >&2
-    echo "" >&2
-    cat >&2 <<'PROFILE_EXAMPLE'
-{
-  "name": "Your Name",
-  "purpose": "work",
-  "role": "developer",
-  "tasks": ["build-websites", "seo"],
-  "apps": ["aem", "figma"]
-}
-PROFILE_EXAMPLE
-    echo "" >&2
-    echo "Fields:" >&2
-    echo "  name     Your name (for display)" >&2
-    echo "  purpose  work | personal | education" >&2
-    echo "  role     developer | designer | marketer | author | ..." >&2
-    echo "  tasks    List of tasks you perform" >&2
-    echo "  apps     List of apps/tools you use" >&2
-    exit 1
-  fi
-
-  # Fetch catalog
-  local catalog_url="https://www.sliccy.com/skills/catalog.json"
-  local catalog_body http_status tmpfile
-  tmpfile=$(mktemp)
-  http_status=$(curl -sS -w '%{http_code}' -o "$tmpfile" "$catalog_url" 2>/dev/null) || true
-  catalog_body=$(cat "$tmpfile")
-  rm -f "$tmpfile"
-
-  if [[ ! "$http_status" =~ ^2 ]]; then
-    die "Failed to fetch skill catalog (HTTP ${http_status})"
-  fi
-
-  # Score and filter
-  local scored
-  scored=$(printf '%s' "$catalog_body" | score_catalog)
-
-  # Filter out already-installed skills
-  local filtered=""
-  while IFS='|' read -r score name displayName description repo path skill matchDetail; do
-    [[ -z "$score" ]] && continue
-    if ! is_skill_installed "$name"; then
-      filtered+="${score}|${name}|${displayName}|${description}|${repo}|${path}|${skill}|${matchDetail}"$'\n'
-    fi
-  done <<< "$scored"
-  filtered="${filtered%$'\n'}"
-
-  if [[ -z "$filtered" ]]; then
-    echo "No new skill recommendations found."
-    echo "All matching skills are already installed, or your profile has no matches."
-    return 0
-  fi
-
-  if [[ -n "$do_install" ]]; then
-    # Batch install all recommended skills
-    local count=0
-    while IFS='|' read -r score name displayName description repo path skill matchDetail; do
-      [[ -z "$score" ]] && continue
-      count=$((count + 1))
-      local install_repo="${repo:-}"
-      local install_skill="${skill:-$name}"
-      if [[ -z "$install_repo" ]]; then
-        log "Skipping $displayName: no repo specified in catalog"
-        continue
-      fi
-      local -a cmd_args=("$install_repo" "--skill" "$install_skill")
-      if [[ -n "$path" ]]; then
-        cmd_args+=("--path" "$path")
-      fi
-      echo "Installing: ${displayName} from ${install_repo} ..."
-      main "${cmd_args[@]}" || log "Warning: failed to install ${displayName}"
-    done <<< "$filtered"
-    echo ""
-    echo "Installed ${count} recommended skill(s)."
-    return 0
-  fi
-
-  # Display recommendations
-  echo "Recommended skills for you:"
-  echo ""
-
-  local idx=0
-  local -a install_repos=()
-  local -a install_skills=()
-  local -a install_paths=()
-  while IFS='|' read -r score name displayName description repo path skill matchDetail; do
-    [[ -z "$score" ]] && continue
-    idx=$((idx + 1))
-    install_repos+=("$repo")
-    install_skills+=("${skill:-$name}")
-    install_paths+=("$path")
-
-    # Format: number, display name, right-aligned score
-    printf "  %d. %-40s score: %s\n" "$idx" "$displayName" "$score"
-    if [[ -n "$description" ]]; then
-      printf "     %s\n" "$description"
-    fi
-    printf "     Match: %s\n" "$matchDetail"
-    local install_cmd="${PROGRAM_NAME} ${repo} --skill ${skill:-$name}"
-    if [[ -n "$path" ]]; then
-      install_cmd+=" --path ${path}"
-    fi
-    printf "     Install: %s\n" "$install_cmd"
-    echo ""
-  done <<< "$filtered"
-
-  echo "To install all recommended: ${PROGRAM_NAME} recommendations --install"
-}
-
 install_from_clawhub() {
   # Install a skill from ClawHub by slug.
   # $1: slug, $2: dest dir, $3: force flag
@@ -872,7 +523,6 @@ install_from_clawhub() {
   local dest_dir="$2"
   local force="${3:-}"
 
-  require_cmd jq
   require_cmd curl
 
   # Check if destination already exists
@@ -903,6 +553,14 @@ install_from_clawhub() {
   if ! command -v unzip >/dev/null 2>&1; then
     die "unzip is required for ClawHub downloads"
   fi
+
+  # Zip-slip protection: list entries and reject path traversal
+  local entries
+  entries=$(unzip -l "$zip_file" 2>/dev/null | awk 'NR>3 && /^[ ]*[0-9]/ {print $NF}') || die "Failed to list ClawHub archive for: $slug"
+  if printf '%s\n' "$entries" | grep -qE '(^|/)\.\.(/|$)'; then
+    die "ClawHub archive contains path traversal entries, refusing to extract: $slug"
+  fi
+
   unzip -q "$zip_file" -d "$_UPS_TMPDIR/clawhub_unzipped" 2>/dev/null || die "Failed to unzip ClawHub archive for: $slug"
 
   # Install into dest_dir/slug, skipping _meta.json
@@ -1212,11 +870,6 @@ main() {
       cmd_search "$@"
       return 0
       ;;
-    recommendations)
-      shift
-      cmd_recommendations "$@"
-      return 0
-      ;;
   esac
 
   local repo=""
@@ -1297,6 +950,7 @@ main() {
   require_cmd awk
   require_cmd sed
   require_cmd curl
+  require_cmd tar
 
   # --- ClawHub install path ---
   if [[ "$source_type" == "clawhub" ]]; then
@@ -1304,9 +958,9 @@ main() {
     if [[ -n "$dest_path" ]]; then
       ch_dest_dir="$dest_path"
     elif [[ -n "$global_install" ]]; then
-      ch_dest_dir="$HOME/.skills"
+      ch_dest_dir="$HOME/.agents/skills"
     else
-      ch_dest_dir=".skills"
+      ch_dest_dir=".agents/skills"
     fi
     mkdir -p "$ch_dest_dir"
     install_from_clawhub "$clawhub_slug" "$ch_dest_dir" "$force"
@@ -1337,37 +991,63 @@ main() {
   local owner_repo="$repo"
 
   _try_zip_download() {
-    local dl_branch="$1"
-    local zip_url="https://codeload.github.com/${owner_repo}/zip/refs/heads/${dl_branch}"
-    local zip_file="$_UPS_TMPDIR/repo.zip"
+    local dl_ref="$1"
+    # Try refs/heads/ first, then refs/tags/, then raw ref (for commits)
+    local -a url_patterns=(
+      "https://codeload.github.com/${owner_repo}/zip/refs/heads/${dl_ref}"
+      "https://codeload.github.com/${owner_repo}/zip/refs/tags/${dl_ref}"
+      "https://codeload.github.com/${owner_repo}/zip/${dl_ref}"
+    )
 
-    log "Downloading ZIP: $zip_url"
-    github_curl -o "$zip_file" "$zip_url"
+    for zip_url in "${url_patterns[@]}"; do
+      local zip_file="$_UPS_TMPDIR/repo.zip"
 
-    # Check for HTTP errors
-    if [[ "$_GITHUB_CURL_STATUS" =~ ^2 ]]; then
-      : # success
-    elif [[ "$_GITHUB_CURL_STATUS" == "404" ]]; then
-      rm -f "$zip_file"
-      return 1  # not found – caller may retry other branches
-    elif [[ "$_GITHUB_CURL_STATUS" == "429" || "$_GITHUB_CURL_STATUS" == "403" || "$_GITHUB_CURL_STATUS" == "401" ]]; then
-      rm -f "$zip_file"
-      # Read error body from file if it exists
-      local err_body=""
-      if [[ -f "$zip_file" ]]; then
-        err_body=$(cat "$zip_file")
+      log "Downloading ZIP: $zip_url"
+      github_curl -o "$zip_file" "$zip_url"
+
+      # Check for HTTP errors
+      if [[ "$_GITHUB_CURL_STATUS" =~ ^2 ]]; then
+        # Success - proceed to unzip
+        break
+      elif [[ "$_GITHUB_CURL_STATUS" == "404" ]]; then
+        rm -f "$zip_file"
+        continue  # try next URL pattern
+      elif [[ "$_GITHUB_CURL_STATUS" == "429" || "$_GITHUB_CURL_STATUS" == "403" || "$_GITHUB_CURL_STATUS" == "401" ]]; then
+        # Read error body before removing
+        local err_body=""
+        if [[ -f "$zip_file" ]]; then
+          err_body=$(cat "$zip_file")
+        fi
+        rm -f "$zip_file"
+        handle_github_error "$_GITHUB_CURL_STATUS" "$err_body"
+      else
+        rm -f "$zip_file"
+        continue
       fi
-      handle_github_error "$_GITHUB_CURL_STATUS" "$err_body"
-    else
-      rm -f "$zip_file"
+    done
+
+    # Check if we got a successful download
+    if [[ ! -f "$zip_file" ]] || [[ ! "$_GITHUB_CURL_STATUS" =~ ^2 ]]; then
       return 1
     fi
 
     # Unzip and strip top-level directory prefix
     if command -v unzip >/dev/null 2>&1; then
+      # Zip-slip protection: check entries before extracting
+      local entries
+      entries=$(unzip -l "$zip_file" 2>/dev/null | awk 'NR>3 && /^[ ]*[0-9]/ {print $NF}') || return 1
+      if printf '%s\n' "$entries" | grep -qE '(^|/)\.\.(/|$)'; then
+        log "Warning: ZIP archive contains path traversal entries, skipping"
+        rm -f "$zip_file"
+        return 1
+      fi
       unzip -q "$zip_file" -d "$_UPS_TMPDIR/unzipped" 2>/dev/null || return 1
     else
-      die "unzip is required for ZIP-based downloads"
+      rm -f "$zip_file"
+      if command -v gh >/dev/null 2>&1; then
+        return 1
+      fi
+      die "unzip is required for ZIP-based downloads and gh is not installed for fallback cloning"
     fi
 
     # GitHub ZIPs have a single top-level dir: {repo}-{branch}/
@@ -1381,17 +1061,43 @@ main() {
     return 0
   }
 
+  _resolve_default_branch() {
+    # Use GitHub API to resolve the default branch
+    local api_url="https://api.github.com/repos/${owner_repo}"
+    github_curl "$api_url"
+    if [[ "$_GITHUB_CURL_STATUS" =~ ^2 ]]; then
+      local default_branch
+      default_branch=$(printf '%s' "$_GITHUB_CURL_BODY" | grep -o '"default_branch":"[^"]*"' | head -1 | sed 's/"default_branch":"//;s/"$//')
+      if [[ -n "$default_branch" ]]; then
+        printf '%s' "$default_branch"
+        return 0
+      fi
+    fi
+    return 1
+  }
+
   if [[ -n "$branch" ]]; then
-    log "Downloading $repo (branch: $branch) as ZIP ..."
+    log "Downloading $repo (ref: $branch) as ZIP ..."
     if _try_zip_download "$branch"; then
       zip_ok=1
     fi
   else
     log "Downloading $repo as ZIP ..."
-    if _try_zip_download "main"; then
-      zip_ok=1
-    elif _try_zip_download "master"; then
-      zip_ok=1
+    # Try to resolve default branch via API first
+    local resolved_branch
+    if resolved_branch=$(_resolve_default_branch); then
+      log "Resolved default branch: $resolved_branch"
+      if _try_zip_download "$resolved_branch"; then
+        zip_ok=1
+      fi
+    fi
+    # Fall back to trying common branch names
+    if [[ -z "$zip_ok" ]]; then
+      if _try_zip_download "main"; then
+        zip_ok=1
+      elif _try_zip_download "master"; then
+        zip_ok=1
+      fi
     fi
   fi
 
@@ -1402,10 +1108,10 @@ main() {
     require_cmd git
     if [[ -n "$branch" ]]; then
       log "Cloning $repo (branch: $branch) ..."
-      gh repo clone "$repo" "$clone_dir" -- -b "$branch" >/dev/null
+      gh repo clone "$repo" "$clone_dir" -- -b "$branch" --depth 1 >/dev/null
     else
       log "Cloning $repo ..."
-      gh repo clone "$repo" "$clone_dir" >/dev/null
+      gh repo clone "$repo" "$clone_dir" -- --depth 1 >/dev/null
     fi
   fi
 
@@ -1448,22 +1154,23 @@ main() {
     exit 0
   fi
 
-  # Determine destination: --dest-path > --global > default (.skills)
+  # Determine destination: --dest-path > --global > default (.agents/skills)
   local dest_skills_dir
   if [[ -n "$dest_path" ]]; then
     dest_skills_dir="$dest_path"
     log "Installing skills to custom path: $dest_skills_dir"
   elif [[ -n "$global_install" ]]; then
-    dest_skills_dir="$HOME/.skills"
+    dest_skills_dir="$HOME/.agents/skills"
     log "Installing skills globally to $dest_skills_dir"
   else
-    dest_skills_dir=".skills"
+    dest_skills_dir=".agents/skills"
   fi
   mkdir -p "$dest_skills_dir"
 
   # Install skills
   local skill_count=0
   local batch_index=0
+  local -a installed_skill_names=()
 
   if [[ -n "$install_all" ]]; then
     log "Installing all $total_count skills..."
@@ -1476,6 +1183,7 @@ main() {
       fi
       if copy_skill "$path" "$dest_skills_dir" "$force" "$prefix"; then
         skill_count=$((skill_count + 1))
+        installed_skill_names+=("$(basename "$(dirname "$path")")")
       fi
     done <"$tmpfile"
   elif [[ ${#selected_skills[@]} -gt 0 ]]; then
@@ -1492,6 +1200,7 @@ main() {
         if [[ "$name" == "$skill_name" ]]; then
           if copy_skill "$path" "$dest_skills_dir" "$force" "$prefix"; then
             skill_count=$((skill_count + 1))
+            installed_skill_names+=("$(basename "$(dirname "$path")")")
           fi
           found=1
           break
@@ -1513,48 +1222,48 @@ main() {
   rm -f "$tmpfile"
   log "Installed $skill_count skill(s)"
 
-  # For local installs, write .agents/discover-skills and update AGENTS.md
-  if [[ -z "$global_install" ]]; then
-    # Write .agents/discover-skills
-    mkdir -p .agents
-    local discover
-    discover=".agents/discover-skills"
-    log "Updating $discover ..."
-    generate_discover_skills >"$discover"
-    chmod +x "$discover"
-
-    # Extract Skills section from source AGENTS.md
-    local src_agents
-    src_agents="$clone_dir/AGENTS.md"
-    if [[ -f "$src_agents" ]]; then
-      log "Updating AGENTS.md skills section ..."
-      local block
-      block=$(awk '/^## Skills/{flag=1; print; next} /^## / && flag{exit} flag{print}' "$src_agents")
-      if [[ -z "$block" ]]; then
-        log "Warning: could not extract Skills section from $src_agents"
-      else
-        local start_marker end_marker
-        start_marker='<!-- upskill:skills:start -->'
-        end_marker='<!-- upskill:skills:end -->'
-        insert_or_replace_block "AGENTS.md" "$start_marker" "$end_marker" <<<"$block"
+  # Auto-detect Claude Code and dual-install (only when --dest-path is NOT used)
+  if [[ -z "$dest_path" ]]; then
+    local claude_dest=""
+    if [[ -n "$global_install" ]]; then
+      # Global: check for ~/.claude/
+      if [[ -d "$HOME/.claude" ]]; then
+        claude_dest="$HOME/.claude/skills"
       fi
     else
-      log "Warning: AGENTS.md not found in source repo, skipping skills section"
+      # Local: check for .claude/ directory or CLAUDE.md file
+      if [[ -d ".claude" || -f "CLAUDE.md" ]]; then
+        claude_dest=".claude/skills"
+      fi
     fi
 
-    # Optionally append ignore rules
-    if [[ -n "$add_to_gitignore" ]]; then
-      local start_marker end_marker
-      start_marker="# upskill:gitignore:start"
-      end_marker="# upskill:gitignore:end"
-      local block
-      block=$(cat <<'EOB'
-.skills/
-.agents/discover-skills
-EOB
-)
-      insert_or_replace_block ".gitignore" "$start_marker" "$end_marker" <<<"$block"
-      log "Updated .gitignore with upskill block"
+    if [[ -n "$claude_dest" ]]; then
+      log "Also installing to $claude_dest (Claude Code detected)"
+      mkdir -p "$claude_dest"
+      # Copy each installed skill from the primary destination to the Claude destination
+      for sname in "${installed_skill_names[@]}"; do
+        mkdir -p "$claude_dest/$sname"
+        copy_tree "$dest_skills_dir/$sname" "$claude_dest/$sname"
+      done
+
+      # If -i is set and this is a local install, add .claude/skills/ to .gitignore
+      if [[ -n "${add_to_gitignore:-}" && -z "$global_install" ]]; then
+        if ! grep -qxF '.claude/skills/' .gitignore 2>/dev/null; then
+          printf '\n.claude/skills/\n' >>.gitignore
+          log "Added .claude/skills/ to .gitignore"
+        fi
+      fi
+    fi
+  fi
+
+  # Optionally add skills directory to .gitignore
+  if [[ -n "$add_to_gitignore" && -z "$global_install" ]]; then
+    local gitignore_entry="${dest_skills_dir%/}/"
+    if [[ "$gitignore_entry" != /* ]]; then
+      if ! grep -qxF "$gitignore_entry" .gitignore 2>/dev/null; then
+        printf '\n# upskill\n%s\n' "$gitignore_entry" >>.gitignore
+        log "Added $gitignore_entry to .gitignore"
+      fi
     fi
   fi
 

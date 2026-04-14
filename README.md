@@ -2,7 +2,7 @@
 
 # upskill
 
-[![44% Vibe_Coded](https://img.shields.io/badge/44%25-Vibe_Coded-ff69b4?style=for-the-badge&logo=claude&logoColor=white)](https://github.com/ai-ecoverse/vibe-coded-badge-action)
+[![57% Vibe_Coded](https://img.shields.io/badge/57%25-Vibe_Coded-ff69b4?style=for-the-badge&logo=claude&logoColor=white)](https://github.com/ai-ecoverse/vibe-coded-badge-action)
 
 Install [Agent Skills](https://agentskills.io) from GitHub repositories.
 
@@ -25,7 +25,7 @@ Install [Agent Skills](https://agentskills.io) from GitHub repositories.
 
 Skills are discovered by scanning for `**/SKILL.md` files per the [agentskills.io spec](https://agentskills.io/specification).
 
-**List available skills in a repository:**
+**List available skills:**
 ```
 upskill anthropics/skills --list
 ```
@@ -53,15 +53,12 @@ upskill anthropics/skills --all --force
 | `info <name>` | Show details about a locally installed skill |
 | `read <name>` | Print the SKILL.md content of a locally installed skill |
 | `search <query>` | Search ClawHub and Tessl skill registries |
-| `recommendations` | Recommend skills based on your project |
-| `recommendations --install` | Install all recommended skills |
 
 ```
 upskill list                        # Show local skills
 upskill info pdf                    # Show skill details
 upskill read pdf                    # Print SKILL.md content
 upskill search "pdf converter"      # Search registries
-upskill recommendations             # Show recommendations
 ```
 
 ### Install sources
@@ -97,15 +94,15 @@ npx skills add https://github.com/adobe/skills/tree/main/skills/aem/edge-deliver
 
 ### Install skills globally (personal skills)
 
-Use the `-g` or `--global` flag to install skills to `~/.skills` instead of the project's `.skills` directory:
+Use the `-g` or `--global` flag to install skills to `~/.agents/skills` instead of the project's `.agents/skills/` directory:
 
 ```
 upskill -g anthropics/skills --skill pdf --skill xlsx
 ```
 
 When installing globally:
-- Skills are installed to `~/.skills`
-- `.agents/discover-skills` and `AGENTS.md` are not modified (since these are project-specific)
+- Skills are installed to `~/.agents/skills`
+- If `~/.claude/` exists, skills are also installed to `~/.claude/skills/` (see [Claude Code auto-detection](#claude-code-auto-detection))
 
 ### Install to custom destination
 
@@ -115,13 +112,13 @@ Use `--dest-path` to install skills to a custom location:
 upskill anthropics/skills --skill pdf --dest-path .claude/skills
 ```
 
-This is useful for compatibility with tools that expect skills in different locations (e.g., `.claude/skills`).
+This is useful for compatibility with tools that expect skills in different locations. Note that `--dest-path` disables [Claude Code auto-detection](#claude-code-auto-detection).
 
 ### Options
 
 | Option | Description |
 |--------|-------------|
-| `-g, --global` | Install to `~/.skills` (personal skills) |
+| `-g, --global` | Install to `~/.agents/skills` (personal skills) |
 | `-b, --branch <ref>` | Branch, tag, or commit to clone |
 | `-p, --path <subfolder>` | Only discover skills under this subfolder |
 | `--dest-path <path>` | Custom destination path (overrides `-g`) |
@@ -129,29 +126,26 @@ This is useful for compatibility with tools that expect skills in different loca
 | `--skill <name>` | Install specific skill(s) (repeatable) |
 | `--all` | Install all discovered skills |
 | `--force` | Overwrite existing skill directories |
-| `-i` | Add `.skills/` to `.gitignore` |
+| `-i` | Add `.agents/skills/` to `.gitignore` |
 | `-q, --quiet` | Reduce output |
 
 ## How it works
 
-1. Downloads the source repository as a ZIP archive from GitHub (no `git` or `gh` CLI required)
-2. Falls back to `gh repo clone` if the ZIP download fails and `gh` is available
+1. Downloads the source repository as a ZIP archive from GitHub (no `git` required; ZIP installs require `unzip`, but not the `gh` CLI)
+2. Falls back to `gh repo clone` if the ZIP path cannot be used and `gh` is available
 3. Scans for all `**/SKILL.md` files (per agentskills.io spec)
-4. Copies selected skill directories to `.skills/` (or custom destination)
-5. Creates `.agents/discover-skills` helper script
-6. Updates `AGENTS.md` with skills section (if source has one)
+4. Copies selected skill directories to `.agents/skills/` (or custom destination)
 
-Authentication is handled automatically via `gh auth token` when the `gh` CLI is installed. If you hit GitHub API rate limits, authenticate with `gh auth login`.
+ZIP-based installs work without `gh`, but require `unzip`. When the `gh` CLI is installed, authentication can be handled automatically via `gh auth token`, and `gh repo clone` may be used as a fallback if the ZIP path fails. If you hit GitHub API rate limits, authenticate with `gh auth login`.
 
-## Discover installed skills
+### Claude Code auto-detection
 
-After installing, list available skills in your project:
+When `--dest-path` is **not** used, upskill automatically detects Claude Code environments and dual-installs skills:
 
-```
-./.agents/discover-skills
-```
+- **Local installs:** if a `.claude/` directory or `CLAUDE.md` file exists in the project, skills are also installed to `.claude/skills/`
+- **Global installs (`-g`):** if `~/.claude/` exists, skills are also installed to `~/.claude/skills/`
 
-This scans both project skills (`.skills/`) and personal skills (`~/.skills/`), plus legacy `.claude/skills` locations for backwards compatibility.
+Using `--dest-path` disables this auto-detection — skills are only installed to the specified path.
 
 ## Development
 
@@ -169,4 +163,4 @@ Part of the **[AI Ecoverse](https://github.com/ai-ecoverse/.github)** - tools fo
 
 ## Acknowledgments
 
-Several features in this release were inspired by the upskill implementation in [slicc](https://github.com/ai-ecoverse/slicc), including registry search, ClawHub/Tessl integration, ZIP-based installs, and skill recommendations.
+Several features in this release were inspired by the upskill implementation in [slicc](https://github.com/ai-ecoverse/slicc), including registry search, ClawHub/Tessl integration, and ZIP-based installs.
