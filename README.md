@@ -160,6 +160,7 @@ Part of the **[AI Ecoverse](https://github.com/ai-ecoverse/.github)** - tools fo
 - [ai-aligned-git](https://github.com/ai-ecoverse/ai-aligned-git) - Git wrapper for safe AI commit practices
 - [ai-aligned-gh](https://github.com/ai-ecoverse/ai-aligned-gh) - GitHub CLI wrapper for proper AI attribution
 - [vibe-coded-badge-action](https://github.com/ai-ecoverse/vibe-coded-badge-action) - Badge showing AI-generated code percentage
+- [skills](https://github.com/ai-ecoverse/skills) - AI Ecoverse skills collection
 
 ## Acknowledgments
 
