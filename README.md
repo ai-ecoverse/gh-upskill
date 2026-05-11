@@ -82,14 +82,14 @@ upskill anthropics/skills@main --list
 Use `-p` or `--path` to restrict skill discovery to a subfolder within the repository. This is useful for repos that organize skills in nested directories:
 
 ```
-upskill adobe/skills --path skills/aem/edge-delivery-services --list
-upskill adobe/skills --path skills/aem/edge-delivery-services --all
-upskill adobe/skills --path skills/aem/edge-delivery-services --skill content-driven-development
+upskill adobe/skills --path plugins/aem/edge-delivery-services --list
+upskill adobe/skills --path plugins/aem/edge-delivery-services --all
+upskill adobe/skills --path plugins/aem/edge-delivery-services --skill content-driven-development
 ```
 
 This is equivalent to the Vercel Skills CLI's tree-URL syntax:
 ```
-npx skills add https://github.com/adobe/skills/tree/main/skills/aem/edge-delivery-services --all
+npx skills add https://github.com/adobe/skills/tree/main/plugins/aem/edge-delivery-services --all
 ```
 
 ### Install skills globally (personal skills)

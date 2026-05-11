@@ -3,7 +3,7 @@ set -Eeo pipefail
 IFS=$'\n\t'
 
 PROGRAM_NAME="upskill"
-VERSION="0.3.0"
+VERSION="0.4.0"
 
 usage() {
   cat <<USAGE
@@ -42,7 +42,7 @@ Examples:
   ${PROGRAM_NAME} anthropics/skills@main --list              # Inline branch
   ${PROGRAM_NAME} -g anthropics/skills --skill pdf  # Install to ~/.agents/skills
   ${PROGRAM_NAME} anthropics/skills --dest-path .claude/skills  # Custom destination
-  ${PROGRAM_NAME} adobe/skills --path skills/aem/edge-delivery-services --all  # Subfolder
+  ${PROGRAM_NAME} adobe/skills --path plugins/aem/edge-delivery-services --all  # Subfolder
   ${PROGRAM_NAME} anthropics/skills --all --force     # Overwrite existing skills
   ${PROGRAM_NAME} clawhub:tavily-search                      # Install from ClawHub
   ${PROGRAM_NAME} https://clawhub.ai/user/my-skill           # Install from ClawHub URL
@@ -90,6 +90,33 @@ die() {
 
 require_cmd() {
   command -v "$1" >/dev/null 2>&1 || die "Required command not found: $1"
+}
+
+check_gh_skill_deprecation() {
+  # Only run when invoked via the gh extension wrapper (see gh-upskill).
+  [[ "${UPSKILL_VIA_GH:-}" == "1" ]] || return 0
+  command -v gh >/dev/null 2>&1 || return 0
+
+  if gh skill --help >/dev/null 2>&1; then
+    cat >&2 <<'EOF'
+Error: `gh upskill` is deprecated. The GitHub CLI now provides `gh skill` natively.
+
+Please use `gh skill` instead:
+  gh skill install <owner/repo>
+  gh skill search <query>
+  gh skill update
+
+See: https://github.blog/changelog/2026-04-16-manage-agent-skills-with-github-cli/
+EOF
+    exit 1
+  fi
+
+  cat >&2 <<'EOF'
+Notice: `gh upskill` is on a soft-deprecation path. The GitHub CLI now ships a
+native `gh skill` command (gh >= 2.90.0). Please update gh and use `gh skill`
+going forward: https://github.blog/changelog/2026-04-16-manage-agent-skills-with-github-cli/
+
+EOF
 }
 
 cleanup() {
@@ -848,6 +875,8 @@ cmd_search() {
 }
 
 main() {
+  check_gh_skill_deprecation
+
   # Handle subcommands before flag parsing
   case "${1:-}" in
     list)
@@ -1119,7 +1148,30 @@ main() {
   local search_dir="$clone_dir"
   if [[ -n "$sub_path" ]]; then
     search_dir="$clone_dir/$sub_path"
-    [[ -d "$search_dir" ]] || die "Path not found in repository: $sub_path"
+    if [[ ! -d "$search_dir" ]]; then
+      # Look for directories matching the requested basename to suggest
+      # alternatives. Repos often reorganize (e.g. moving `skills/foo` under
+      # `plugins/foo`) and a bare "path not found" gives the user nothing to
+      # work with.
+      local sub_basename
+      sub_basename=$(basename "$sub_path")
+      local -a suggestions=()
+      while IFS= read -r match; do
+        suggestions+=("${match#"$clone_dir"/}")
+      done < <(find "$clone_dir" -type d -name "$sub_basename" -not -path '*/.git/*' 2>/dev/null | head -n 5)
+
+      local err="Path not found in repository: $sub_path"
+      if [[ ${#suggestions[@]} -gt 0 ]]; then
+        err+=$'\n\nDid you mean one of these?'
+        for s in "${suggestions[@]}"; do
+          err+=$'\n  --path '"$s"
+        done
+      fi
+      if [[ -z "$branch" ]]; then
+        err+=$'\n\nNote: the path was looked up on the default branch. Try a different branch with --branch <name> or owner/repo@<branch>.'
+      fi
+      die "$err"
+    fi
 
     # Prevent path traversal outside the cloned repo
     local canonical_clone canonical_search

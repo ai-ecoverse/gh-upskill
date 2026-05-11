@@ -64,11 +64,19 @@ test ! -d .claude/skills || { echo "FAIL: --dest-path should disable Claude auto
 
 # --- Test 7: --path subfolder filtering ---
 echo "Test 7: --path subfolder filtering ..."
-"$ROOT_DIR/upskill" adobe/skills -b main --path skills/aem/edge-delivery-services --all --dest-path path-filtered-skills
+"$ROOT_DIR/upskill" adobe/skills -b main --path plugins/aem/edge-delivery-services --all --dest-path path-filtered-skills
 test -d path-filtered-skills || { echo "FAIL: path-filtered-skills directory missing"; exit 1; }
 count_path=$(find path-filtered-skills -name 'SKILL.md' -type f | wc -l | tr -d ' ')
 [[ "$count_path" -gt 0 ]] || { echo "FAIL: No skills found with --path filter"; exit 1; }
 echo "  Found $count_path skill(s) with --path filter"
+
+# --- Test 7b: --path not found suggests alternatives ---
+echo "Test 7b: --path suggests alternatives on miss ..."
+suggest_out=$("$ROOT_DIR/upskill" adobe/skills -b main --path skills/aem/edge-delivery-services --all --dest-path suggest-skills 2>&1 || true)
+echo "$suggest_out" | grep -q "Path not found in repository" || { echo "FAIL: missing not-found error"; echo "$suggest_out"; exit 1; }
+echo "$suggest_out" | grep -q "Did you mean" || { echo "FAIL: missing suggestion hint"; echo "$suggest_out"; exit 1; }
+echo "$suggest_out" | grep -q "plugins/aem/edge-delivery-services" || { echo "FAIL: missing plugins/aem/edge-delivery-services suggestion"; echo "$suggest_out"; exit 1; }
+echo "  Correctly suggested moved path"
 
 # --- Test 8: -i adds correct entries to .gitignore ---
 echo "Test 8: -i adds correct entries to .gitignore ..."
@@ -318,6 +326,34 @@ if command -v jq >/dev/null 2>&1; then
   echo "  Help text includes search subcommand"
 else
   echo "  SKIP: jq not installed, skipping search tests"
+fi
+
+# --- Test 27: gh-skill soft deprecation (no UPSKILL_VIA_GH = silent) ---
+echo "Test 27: no deprecation notice when not invoked via gh ..."
+no_via_out=$("$ROOT_DIR/upskill" --version 2>&1)
+if echo "$no_via_out" | grep -qi "deprecat\|soft-deprecation"; then
+  echo "FAIL: deprecation notice should only fire when invoked via gh wrapper"
+  echo "Output: $no_via_out"
+  exit 1
+fi
+echo "  No deprecation notice when invoked directly"
+
+# --- Test 28: gh-skill soft deprecation (UPSKILL_VIA_GH=1) ---
+echo "Test 28: soft deprecation when gh skill is unavailable ..."
+if command -v gh >/dev/null 2>&1; then
+  # Real gh is present; if `gh skill` works, the wrapper hard-exits, otherwise warns.
+  if gh skill --help >/dev/null 2>&1; then
+    hard_out=$(UPSKILL_VIA_GH=1 "$ROOT_DIR/upskill" --version 2>&1 || true)
+    echo "$hard_out" | grep -q "gh upskill\` is deprecated" || { echo "FAIL: expected hard-exit deprecation message"; echo "$hard_out"; exit 1; }
+    echo "  Hard-exit when gh skill is available"
+  else
+    soft_out=$(UPSKILL_VIA_GH=1 "$ROOT_DIR/upskill" --version 2>&1)
+    echo "$soft_out" | grep -q "soft-deprecation path" || { echo "FAIL: expected soft deprecation notice"; echo "$soft_out"; exit 1; }
+    echo "$soft_out" | grep -q "upskill 0" || { echo "FAIL: expected upskill to continue and print version"; echo "$soft_out"; exit 1; }
+    echo "  Soft warning when gh skill is unavailable, continues to run"
+  fi
+else
+  echo "  SKIP: gh not installed"
 fi
 
 echo ""
