@@ -3,7 +3,7 @@ set -Eeo pipefail
 IFS=$'\n\t'
 
 PROGRAM_NAME="upskill"
-VERSION="0.3.0"
+VERSION="0.3.1"
 
 usage() {
   cat <<USAGE
@@ -42,7 +42,7 @@ Examples:
   ${PROGRAM_NAME} anthropics/skills@main --list              # Inline branch
   ${PROGRAM_NAME} -g anthropics/skills --skill pdf  # Install to ~/.agents/skills
   ${PROGRAM_NAME} anthropics/skills --dest-path .claude/skills  # Custom destination
-  ${PROGRAM_NAME} adobe/skills --path skills/aem/edge-delivery-services --all  # Subfolder
+  ${PROGRAM_NAME} adobe/skills --path plugins/aem/edge-delivery-services --all  # Subfolder
   ${PROGRAM_NAME} anthropics/skills --all --force     # Overwrite existing skills
   ${PROGRAM_NAME} clawhub:tavily-search                      # Install from ClawHub
   ${PROGRAM_NAME} https://clawhub.ai/user/my-skill           # Install from ClawHub URL
@@ -1119,7 +1119,29 @@ main() {
   local search_dir="$clone_dir"
   if [[ -n "$sub_path" ]]; then
     search_dir="$clone_dir/$sub_path"
-    [[ -d "$search_dir" ]] || die "Path not found in repository: $sub_path"
+    if [[ ! -d "$search_dir" ]]; then
+      # Repos commonly reorganize (e.g. moving `skills/foo` under `plugins/foo`).
+      # Look for directories matching the requested basename and offer them as
+      # suggestions so users have something to act on.
+      local sub_basename
+      sub_basename=$(basename "$sub_path")
+      local -a suggestions=()
+      while IFS= read -r match; do
+        suggestions+=("${match#"$clone_dir"/}")
+      done < <(find "$clone_dir" -type d -name "$sub_basename" -not -path '*/.git/*' 2>/dev/null | head -n 5)
+
+      local err="Path not found in repository: $sub_path"
+      if [[ ${#suggestions[@]} -gt 0 ]]; then
+        err+=$'\n\nDid you mean one of these?'
+        for s in "${suggestions[@]}"; do
+          err+=$'\n  --path '"$s"
+        done
+      fi
+      if [[ -z "$branch" ]]; then
+        err+=$'\n\nNote: the path was looked up on the default branch. Try a different branch with --branch <name> or owner/repo@<branch>.'
+      fi
+      die "$err"
+    fi
 
     # Prevent path traversal outside the cloned repo
     local canonical_clone canonical_search

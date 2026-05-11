@@ -64,11 +64,19 @@ test ! -d .claude/skills || { echo "FAIL: --dest-path should disable Claude auto
 
 # --- Test 7: --path subfolder filtering ---
 echo "Test 7: --path subfolder filtering ..."
-"$ROOT_DIR/upskill" adobe/skills -b main --path skills/aem/edge-delivery-services --all --dest-path path-filtered-skills
+"$ROOT_DIR/upskill" adobe/skills -b main --path plugins/aem/edge-delivery-services --all --dest-path path-filtered-skills
 test -d path-filtered-skills || { echo "FAIL: path-filtered-skills directory missing"; exit 1; }
 count_path=$(find path-filtered-skills -name 'SKILL.md' -type f | wc -l | tr -d ' ')
 [[ "$count_path" -gt 0 ]] || { echo "FAIL: No skills found with --path filter"; exit 1; }
 echo "  Found $count_path skill(s) with --path filter"
+
+# --- Test 7b: --path not found suggests alternatives ---
+echo "Test 7b: --path suggests alternatives on miss ..."
+suggest_out=$("$ROOT_DIR/upskill" adobe/skills -b main --path skills/aem/edge-delivery-services --all --dest-path suggest-skills 2>&1 || true)
+echo "$suggest_out" | grep -q "Path not found in repository" || { echo "FAIL: missing not-found error"; echo "$suggest_out"; exit 1; }
+echo "$suggest_out" | grep -q "Did you mean" || { echo "FAIL: missing suggestion hint"; echo "$suggest_out"; exit 1; }
+echo "$suggest_out" | grep -q "plugins/aem/edge-delivery-services" || { echo "FAIL: missing plugins/aem/edge-delivery-services suggestion"; echo "$suggest_out"; exit 1; }
+echo "  Correctly suggested moved path"
 
 # --- Test 8: -i adds correct entries to .gitignore ---
 echo "Test 8: -i adds correct entries to .gitignore ..."
