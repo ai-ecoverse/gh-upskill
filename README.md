@@ -132,7 +132,7 @@ This is useful for compatibility with tools that expect skills in different loca
 ## How it works
 
 1. With git, gh, tar and unzip available, downloads a ZIP archive and falls back to `gh repo clone` if needed.
-2. When any of those tools is missing, uses `curl` and `jq` with GitHub's recursive git trees API to discover `**/SKILL.md`. Downloads manifests for discovery, then the selected skills' files individually through the contents API, pinned to the resolved commit. No archive extraction or git is needed.
+2. When any of those tools is missing and `jq` is available (or `unzip` is unavailable), uses `curl` and `jq` with GitHub's recursive git trees API to discover `**/SKILL.md`. Downloads manifests for discovery, then the selected skills' files individually through the contents API, pinned to the resolved commit. No archive extraction or git is needed. Desktop installations with `unzip` but no `jq` retain the ZIP path.
 3. Copies selected skill directories, including hidden files and executable modes, to the destination.
 
 Authentication uses `GITHUB_TOKEN`, then `GH_TOKEN`, then `gh auth token` if available. This supports private repositories and higher API rate limits. Errors distinguish rate limits from permission failures. The REST path rejects truncated trees and unsafe paths instead of installing an incomplete or unsafe skill. Symbolic links with absolute targets or `..` components are rejected. ClawHub's ZIP downloads still require `unzip`; Tessl skills that resolve to GitHub can use the REST path.

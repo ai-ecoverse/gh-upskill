@@ -72,6 +72,7 @@ Note: You can specify a branch inline with owner/repo@branch syntax.
       In seven (SLICC_PAGE_LOOPBACK set), defaults to ~/.pi/agent/skills.
       --dest overrides this default.
       Uses curl + jq and GitHub REST trees/files when git, gh, tar or unzip is missing.
+      Without jq, unzip-based installs remain available.
       Otherwise downloads ZIP archives and falls back to gh repo clone.
 
       Authentication: GITHUB_TOKEN, then GH_TOKEN, then 'gh auth token'.
@@ -1184,7 +1185,11 @@ main() {
     return 1
   }
 
-  if ! command -v git >/dev/null 2>&1 || ! command -v gh >/dev/null 2>&1 || ! command -v tar >/dev/null 2>&1 || ! command -v unzip >/dev/null 2>&1; then
+  if ! command -v unzip >/dev/null 2>&1 || {
+    command -v jq >/dev/null 2>&1 && {
+      ! command -v git >/dev/null 2>&1 || ! command -v gh >/dev/null 2>&1 || ! command -v tar >/dev/null 2>&1
+    }
+  }; then
     download_api_repository "$repo" "$branch" "$clone_dir" "$sub_path"
     zip_ok=1
   elif [[ -n "$branch" ]]; then

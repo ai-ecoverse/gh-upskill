@@ -47,6 +47,7 @@ case "${API_SCENARIO:-}:$url" in
   *:*/ai-ecoverse/gh-upskill/main/install.sh) cat "$FIXTURES/install.sh" > "$output" ;;
   *:*/ai-ecoverse/gh-upskill/main/upskill) cat "$FIXTURES/upskill" > "$output" ;;
   *:*/ai-ecoverse/gh-upskill/main/gh-upskill) cat "$FIXTURES/gh-upskill" > "$output" ;;
+  *:*codeload.github.com/test/repo/*) printf 'ZIP fixture' > "$output" ;;
   *:*/repos/test/repo) printf '{"default_branch":"feature/portable"}' > "$output" ;;
   *:*/commits/*) printf '{"sha":"commit-sha"}' > "$output" ;;
   *:*/git/trees/*) cat "$FIXTURES/tree.json" > "$output" ;;
@@ -113,4 +114,21 @@ upskill test/repo@main --skill demo --dest "$TMP/from-installer"
 test -f "$TMP/from-installer/demo/SKILL.md"
 bash "$ROOT_DIR/install.sh" --prefix "$TMP/prefix"
 test -x "$TMP/prefix/bin/upskill"
+rm "$TMP/bin/jq"
+cat > "$TMP/bin/unzip" <<'UNZIP'
+#!/usr/bin/env bash
+set -e
+case "$1" in
+  -l) printf '%s\n' 'Archive: fixture' 'Length Date Time Name' '------ ---- ---- ----' '1 2026-10-09 00:00 fixture-main/demo/SKILL.md' ;;
+  -q)
+    mkdir -p "$4/fixture-main/demo"
+    cp "$FIXTURES/SKILL.md" "$4/fixture-main/demo/SKILL.md"
+    ;;
+  *) exit 1 ;;
+esac
+UNZIP
+chmod +x "$TMP/bin/unzip"
+upskill test/repo@main --skill demo --dest "$TMP/zip-without-jq"
+test -f "$TMP/zip-without-jq/demo/SKILL.md"
+grep -q 'codeload.github.com/test/repo/' "$FIXTURES/requests"
 echo 'PORTABLE TESTS PASSED'
