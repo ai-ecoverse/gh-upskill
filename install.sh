@@ -14,7 +14,7 @@ Usage:
 
 Options:
   --prefix <dir>     Install prefix (default: /usr/local or ~/.local)
-  --bin-dir <dir>    Install bin dir (default: <prefix>/bin; PNPM_HOME in seven)
+  --bin-dir <dir>    Install bin dir (default: <prefix>/bin; PNPM_HOME/bin in seven)
   -h, --help         Show help
 USAGE
 }
@@ -31,12 +31,12 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-if [[ -z "$PREFIX" && -z "$BIN_DIR" && -n "${SLICC_PAGE_LOOPBACK:-}" ]]; then
-  BIN_DIR="${PNPM_HOME:-$HOME/.local/share/pnpm}"
+if [[ -z "$PREFIX" && -z "$BIN_DIR" ]] && { [[ -n "${SLICC_PAGE_LOOPBACK:-}" ]] || [[ -n "${PNPM_HOME:-}" && ":$PATH:" == *":$PNPM_HOME/bin:"* ]]; }; then
+  BIN_DIR="${PNPM_HOME:-$HOME/.local/share/pnpm}/bin"
   case ":$PATH:" in
     *":$BIN_DIR:"*) ;;
     *)
-      echo "Error: seven's PNPM_HOME ($BIN_DIR) must be on PATH. Set PNPM_HOME or use --bin-dir." >&2
+      echo "Error: seven's bin directory ($BIN_DIR) must be on PATH. Set PNPM_HOME or use --bin-dir." >&2
       exit 1
       ;;
   esac
