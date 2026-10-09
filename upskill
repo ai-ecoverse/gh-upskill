@@ -69,7 +69,7 @@ Note: You can specify a branch inline with owner/repo@branch syntax.
       Skills are discovered by scanning for **/SKILL.md files per the agentskills.io spec.
       Your agent likely already supports this spec natively - this tool may not be needed.
 
-      In seven (PNPM_HOME/bin on PATH or SLICC_PAGE_LOOPBACK set), defaults to ~/.pi/agent/skills.
+      In seven (Emscripten or SLICC_PAGE_LOOPBACK set), defaults to ~/.pi/agent/skills.
       --dest overrides this default.
       Uses curl + jq and GitHub REST trees/files when git, gh, tar or unzip is missing.
       Without jq, unzip-based installs remain available.
@@ -1057,7 +1057,7 @@ main() {
   require_cmd sed
   require_cmd curl
 
-  if [[ -z "$dest_path" ]] && { [[ -n "${SLICC_PAGE_LOOPBACK:-}" ]] || [[ -n "${PNPM_HOME:-}" && ":$PATH:" == *":$PNPM_HOME/bin:"* ]]; }; then
+  if [[ -z "$dest_path" ]] && { [[ -n "${SLICC_PAGE_LOOPBACK:-}" ]] || [[ "$(uname -s 2>/dev/null)" == Emscripten ]]; }; then
     dest_path="$HOME/.pi/agent/skills"
   fi
 

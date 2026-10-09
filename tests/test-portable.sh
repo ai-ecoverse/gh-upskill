@@ -5,7 +5,7 @@ ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 mkdir -p "$TMP/bin" "$TMP/fixtures" "$TMP/home"
-for cmd in bash cat chmod cp dirname basename find head awk sed jq mkdir mktemp rm grep wc tr mv ln cmp readlink; do
+for cmd in uname bash cat chmod cp dirname basename find head awk sed jq mkdir mktemp rm grep wc tr mv ln cmp readlink; do
   ln -s "$(command -v "$cmd")" "$TMP/bin/$cmd"
 done
 cat > "$TMP/fixtures/tree.json" <<'JSON'
@@ -108,6 +108,29 @@ if "$ROOT_DIR/upskill" test/repo@main --path missing/demo --all > "$TMP/missing.
 grep -q 'skills/demo' "$TMP/missing.log"
 export PNPM_HOME="$TMP/pnpm"
 export PATH="$PATH:$PNPM_HOME/bin"
+mkdir -p "$TMP/desktop" "$TMP/desktop-bin"
+rm -rf "$HOME/.pi/agent/skills/demo"
+(cd "$TMP/desktop" && "$ROOT_DIR/upskill" test/repo@main --skill demo)
+test -f "$TMP/desktop/.agents/skills/demo/SKILL.md"
+test ! -e "$HOME/.pi/agent/skills/demo"
+cat > "$TMP/desktop-bin/curl" <<'DESKTOP_CURL'
+#!/usr/bin/env bash
+printf '%s\n' "$@" >> "$FIXTURES/desktop-installer-requests"
+DESKTOP_CURL
+for cmd in mkdir chmod; do
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$TMP/desktop-bin/$cmd"
+done
+chmod +x "$TMP/desktop-bin/"*
+PATH="$TMP/desktop-bin:$PATH" bash "$ROOT_DIR/install.sh"
+if [[ $EUID -eq 0 ]]; then desktop_prefix=/usr/local; else desktop_prefix="$HOME/.local"; fi
+grep -Fxq "$desktop_prefix/bin/upskill" "$FIXTURES/desktop-installer-requests"
+if grep -Fq "$PNPM_HOME/bin" "$FIXTURES/desktop-installer-requests"; then exit 1; fi
+rm "$TMP/bin/uname"
+cat > "$TMP/bin/uname" <<'UNAME'
+#!/usr/bin/env bash
+printf 'Emscripten\n'
+UNAME
+chmod +x "$TMP/bin/uname"
 curl -fsSL https://raw.githubusercontent.com/ai-ecoverse/gh-upskill/main/install.sh | bash
 [[ "$(command -v upskill)" == "$PNPM_HOME/bin/upskill" ]]
 SLICC_PAGE_LOOPBACK=1 bash "$ROOT_DIR/install.sh"

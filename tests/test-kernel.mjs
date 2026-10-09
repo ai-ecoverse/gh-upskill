@@ -41,6 +41,7 @@ try {
   await copy(path.join(modules, '@ai-ecoverse'), '/node_modules/@ai-ecoverse');
   const result = await kernel.run(['bash', '-e', '-o', 'pipefail', '-c', `
     uname -a
+    test "$(uname -s)" = Emscripten
     echo "$PATH"
     for tool in git gh tar unzip python perl; do
       if command -v "$tool"; then exit 1; fi

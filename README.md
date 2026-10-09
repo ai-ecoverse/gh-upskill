@@ -146,7 +146,7 @@ curl -fsSL https://raw.githubusercontent.com/ai-ecoverse/gh-upskill/main/install
 upskill adobe/helix-website --skill "Searching AEM Documentation"
 ```
 
-Seven is detected when `PNPM_HOME` is set and `$PNPM_HOME/bin` is on PATH, or when `SLICC_PAGE_LOOPBACK` is set. The installer defaults to `$PNPM_HOME/bin`; if `PNPM_HOME` is absent it uses `~/.local/share/pnpm/bin` and checks that directory is on PATH. Explicit `--prefix` and `--bin-dir` keep their usual meaning. No npm package is needed.
+Seven is detected when `uname -s` reports `Emscripten`, or when `SLICC_PAGE_LOOPBACK` is set. The installer defaults to `$PNPM_HOME/bin`; if `PNPM_HOME` is absent it uses `~/.local/share/pnpm/bin` and checks that directory is on PATH. Explicit `--prefix` and `--bin-dir` keep their usual meaning. No npm package is needed.
 
 In this environment upskill defaults to `~/.pi/agent/skills/<name>/SKILL.md`, including with `-g`. `--dest` or `--dest-path` overrides that default. `list`, `info` and `read` include pi's user skills and `.pi/skills`; pi loads project skills only in trusted folders. The destination also works explicitly outside seven:
 
@@ -190,7 +190,7 @@ upskill adobe/helix-website --skill "Searching AEM Documentation"
 cat "$HOME/.pi/agent/skills/docs-search/SKILL.md"
 ```
 
-The tested kernel reports `Emscripten emscripten 4.0.23 #1 wasm32 Emscripten` for `uname -a`; detection uses the environment and PATH instead. Repeat the manual check with seven's local proxy disabled and enabled to verify its network transports.
+The tested kernel reports `Emscripten emscripten 4.0.23 #1 wasm32 Emscripten` for `uname -a`; detection uses `uname -s` or `SLICC_PAGE_LOOPBACK`. Repeat the manual check with seven's local proxy disabled and enabled to verify its network transports.
 
 ## Related Projects
 

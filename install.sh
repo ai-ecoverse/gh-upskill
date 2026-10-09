@@ -31,7 +31,7 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-if [[ -z "$PREFIX" && -z "$BIN_DIR" ]] && { [[ -n "${SLICC_PAGE_LOOPBACK:-}" ]] || [[ -n "${PNPM_HOME:-}" && ":$PATH:" == *":$PNPM_HOME/bin:"* ]]; }; then
+if [[ -z "$PREFIX" && -z "$BIN_DIR" ]] && { [[ -n "${SLICC_PAGE_LOOPBACK:-}" ]] || [[ "$(uname -s 2>/dev/null)" == Emscripten ]]; }; then
   BIN_DIR="${PNPM_HOME:-$HOME/.local/share/pnpm}/bin"
   case ":$PATH:" in
     *":$BIN_DIR:"*) ;;
