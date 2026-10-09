@@ -68,7 +68,7 @@ cp "$ROOT_DIR/install.sh" "$ROOT_DIR/upskill" "$ROOT_DIR/gh-upskill" "$TMP/fixtu
 cp "$TMP/fixtures/curl" "$TMP/bin/curl"
 chmod +x "$TMP/bin/curl"
 export PATH="$TMP/bin" FIXTURES="$TMP/fixtures" HOME="$TMP/home"
-unset GITHUB_TOKEN GH_TOKEN
+unset GITHUB_TOKEN GH_TOKEN PNPM_HOME SLICC_PAGE_LOOPBACK
 for cmd in git gh tar unzip rsync python perl; do
   if command -v "$cmd" >/dev/null; then echo "FAIL: $cmd is not hidden"; exit 1; fi
 done
@@ -106,10 +106,15 @@ grep -q 'Unsafe path' "$TMP/unsafe.log"
 if "$ROOT_DIR/upskill" test/repo@main --path ../escape --all >/dev/null 2>&1; then exit 1; fi
 if "$ROOT_DIR/upskill" test/repo@main --path missing/demo --all > "$TMP/missing.log" 2>&1; then exit 1; fi
 grep -q 'skills/demo' "$TMP/missing.log"
-export PNPM_HOME="$TMP/pnpm" SLICC_PAGE_LOOPBACK=1
-export PATH="$PNPM_HOME:$PATH"
+export PNPM_HOME="$TMP/pnpm"
+export PATH="$PATH:$PNPM_HOME/bin"
 curl -fsSL https://raw.githubusercontent.com/ai-ecoverse/gh-upskill/main/install.sh | bash
-[[ "$(command -v upskill)" == "$PNPM_HOME/upskill" ]]
+[[ "$(command -v upskill)" == "$PNPM_HOME/bin/upskill" ]]
+SLICC_PAGE_LOOPBACK=1 bash "$ROOT_DIR/install.sh"
+[[ "$(command -v upskill)" == "$PNPM_HOME/bin/upskill" ]]
+rm -rf "$HOME/.pi/agent/skills/demo"
+upskill test/repo@main --skill demo
+test -f "$HOME/.pi/agent/skills/demo/SKILL.md"
 upskill test/repo@main --skill demo --dest "$TMP/from-installer"
 test -f "$TMP/from-installer/demo/SKILL.md"
 bash "$ROOT_DIR/install.sh" --prefix "$TMP/prefix"

@@ -25,8 +25,7 @@ transport.fetch = async request => {
 const kernel = await createNodeKernel({network: {transport}, env: {
   HOME: '/home',
   PNPM_HOME: '/home/.local/share/pnpm',
-  PATH: '/home/.local/share/pnpm:/usr/bin:/bin',
-  SLICC_PAGE_LOOPBACK: '1',
+  PATH: '/usr/bin:/bin:/home/.local/share/pnpm/bin',
   ...(process.env.GITHUB_TOKEN ? {GITHUB_TOKEN: process.env.GITHUB_TOKEN} : {}),
   ...(process.env.GH_TOKEN ? {GH_TOKEN: process.env.GH_TOKEN} : {}),
 }});
@@ -47,7 +46,11 @@ try {
       if command -v "$tool"; then exit 1; fi
     done
     curl -fsSL ${source}install.sh | bash
-    command -v upskill
+    test "$(command -v upskill)" = "$PNPM_HOME/bin/upskill"
+    export SLICC_PAGE_LOOPBACK=1
+    curl -fsSL ${source}install.sh | bash
+    test "$(command -v upskill)" = "$PNPM_HOME/bin/upskill"
+    unset SLICC_PAGE_LOOPBACK
     upskill adobe/helix-website --skill "Searching AEM Documentation"
     test -f "$HOME/.pi/agent/skills/docs-search/SKILL.md"
     upskill read docs-search > /home/read-back.md
