@@ -55,7 +55,7 @@ Options:
   -g, --global              Install skills to ~/.agents/skills (personal skills)
   -b, --branch <ref>        Branch, tag, or commit to clone (default: repo default)
   -p, --path <subfolder>    Only discover skills under this subfolder
-  --dest-path <path>        Custom destination path for skills (overrides -g)
+  --dest, --dest-path <path> Custom destination path for skills (overrides -g)
   --list                    List available skills without installing
   --skill <name>            Install specific skill(s) (can be used multiple times)
   --all                     Install all skills from SKILL.md files
@@ -69,11 +69,14 @@ Note: You can specify a branch inline with owner/repo@branch syntax.
       Skills are discovered by scanning for **/SKILL.md files per the agentskills.io spec.
       Your agent likely already supports this spec natively - this tool may not be needed.
 
-      Downloads repositories as ZIP archives from GitHub (no git/gh required; requires unzip).
-      Falls back to 'gh repo clone' if the ZIP download fails and gh is available.
+      In seven (SLICC_PAGE_LOOPBACK set), defaults to ~/.pi/agent/skills.
+      --dest overrides this default.
+      Uses curl + jq and GitHub REST trees/files when git, gh, tar or unzip is missing.
+      Without jq, unzip-based installs remain available.
+      Otherwise downloads ZIP archives and falls back to gh repo clone.
 
-      Authentication: Uses 'gh auth token' automatically when gh CLI is installed.
-      If you hit rate limits, authenticate with: gh auth login
+      Authentication: GITHUB_TOKEN, then GH_TOKEN, then 'gh auth token'.
+      If rate-limited, set GITHUB_TOKEN/GH_TOKEN or authenticate with gh auth login.
 USAGE
 }
 
@@ -108,8 +111,8 @@ get_github_token() {
     printf '%s' "$_GITHUB_TOKEN"
     return
   fi
-  local token=""
-  if command -v gh >/dev/null 2>&1; then
+  local token="${GITHUB_TOKEN:-${GH_TOKEN:-}}"
+  if [[ -z "$token" ]] && command -v gh >/dev/null 2>&1; then
     token=$(gh auth token 2>/dev/null) || true
   fi
   _GITHUB_TOKEN="${token:-}"
@@ -130,9 +133,9 @@ github_curl() {
   local token
   token=$(get_github_token)
 
-  local -a curl_args=(-sS -w '%{http_code}')
+  local -a curl_args=(-sS -L -w '%{http_code}')
   curl_args+=(-H 'User-Agent: gh-upskill')
-  curl_args+=(-H 'Accept: application/vnd.github+json')
+  curl_args+=(-H "Accept: ${2:-application/vnd.github+json}")
   if [[ -n "$token" ]]; then
     curl_args+=(-H "Authorization: Bearer ${token}")
   fi
@@ -161,18 +164,21 @@ handle_github_error() {
   token=$(get_github_token)
 
   case "$status" in
+    000|"")
+      die "Could not reach GitHub. Check network access; in seven, check CORS or enable the local proxy."
+      ;;
     429|403)
       if [[ "$status" == "403" ]] && ! printf '%s' "$body" | grep -qi "rate limit"; then
         die "GitHub access denied (HTTP 403). Check repository permissions."
       fi
       if [[ -z "$token" ]]; then
-        die "GitHub rate-limited anonymous access. This often happens on shared VPNs. Configure a token: gh auth login"
+        die "GitHub rate-limited anonymous access. This often happens on shared VPNs. Set GITHUB_TOKEN or GH_TOKEN, or run: gh auth login"
       else
         die "GitHub rate-limited access. Retry later."
       fi
       ;;
     401)
-      die "GitHub authentication error (HTTP 401). Your token may be expired. Try: gh auth login"
+      die "GitHub authentication error (HTTP 401). Your token may be expired. Check GITHUB_TOKEN/GH_TOKEN or run: gh auth login"
       ;;
     404)
       die "Repository not found. Check the name and permissions."
@@ -191,13 +197,95 @@ handle_github_error() {
   esac
 }
 
+github_api_request() {
+  github_curl "$@"
+  if [[ ! "$_GITHUB_CURL_STATUS" =~ ^2 ]]; then
+    if [[ "${1:-}" == -o ]]; then
+      _GITHUB_CURL_BODY=$(cat "$2")
+    fi
+    handle_github_error "$_GITHUB_CURL_STATUS" "$_GITHUB_CURL_BODY"
+  fi
+}
+
+api_file() {
+  local path="$1" mode="$2" encoded
+  encoded=$(jq -rn --arg path "$path" '$path | split("/") | map(@uri) | join("/")')
+  mkdir -p "$(dirname "$_UPS_API_SRC/$path")"
+  local url="https://api.github.com/repos/$_UPS_API_REPO/contents/$encoded?ref=$_UPS_API_SHA"
+  if [[ "$mode" == 120000 ]]; then
+    local sha
+    sha=$(jq -er --arg path "$path" '.tree[] | select(.path == $path) | .sha' "$_UPS_API_TREE")
+    url="https://api.github.com/repos/$_UPS_API_REPO/git/blobs/$sha"
+  fi
+  github_curl -o "$_UPS_API_SRC/$path" "$url" "application/vnd.github.raw+json"
+  if [[ ! "$_GITHUB_CURL_STATUS" =~ ^2 ]]; then
+    handle_github_error "$_GITHUB_CURL_STATUS" "$(cat "$_UPS_API_SRC/$path")"
+  fi
+  case "$mode" in
+    100755) chmod 755 "$_UPS_API_SRC/$path" ;;
+    100644) chmod 644 "$_UPS_API_SRC/$path" ;;
+    120000)
+      local target
+      target=$(cat "$_UPS_API_SRC/$path")
+      if [[ -z "$target" || "$target" == /* || "$target" =~ (^|/)\.\.(/|$) ]]; then
+        die "Unsafe symbolic link in repository: $path"
+      fi
+      rm "$_UPS_API_SRC/$path"
+      ln -s "$target" "$_UPS_API_SRC/$path"
+      ;;
+    *) die "Unsupported GitHub file mode $mode: $path" ;;
+  esac
+}
+
+download_api_repository() {
+  require_cmd jq
+  _UPS_API_REPO="$1"
+  local ref="$2" sub_path="$4" encoded path mode
+  _UPS_API_SRC="$3"
+  _UPS_API_TREE="$_UPS_TMPDIR/tree.json"
+  if [[ -z "$ref" ]]; then
+    github_api_request "https://api.github.com/repos/$_UPS_API_REPO"
+    ref=$(printf '%s' "$_GITHUB_CURL_BODY" | jq -er '.default_branch')
+  fi
+  encoded=$(jq -rn --arg ref "$ref" '$ref | @uri')
+  log "Downloading GitHub tree for $_UPS_API_REPO (ref: $ref) ..."
+  github_api_request "https://api.github.com/repos/$_UPS_API_REPO/commits/$encoded"
+  _UPS_API_SHA=$(printf '%s' "$_GITHUB_CURL_BODY" | jq -er '.sha')
+  github_api_request -o "$_UPS_API_TREE" "https://api.github.com/repos/$_UPS_API_REPO/git/trees/$_UPS_API_SHA?recursive=1"
+  jq -e '.truncated == false and (.tree | type == "array")' "$_UPS_API_TREE" >/dev/null || die "GitHub tree is truncated or invalid; narrow the repository or use the ZIP/clone path."
+  jq -e 'all(.tree[]; (.path | test("(^/|(^|/)\\.\\.?(/|$)|[\u0000-\u001f|])") | not))' "$_UPS_API_TREE" >/dev/null || die "Unsafe path in GitHub tree."
+  mkdir -p "$_UPS_API_SRC"
+  while IFS= read -r path; do
+    mkdir -p "$_UPS_API_SRC/$path"
+  done < <(jq -r '.tree[] | select(.type == "tree") | .path' "$_UPS_API_TREE")
+  while IFS=$'\t' read -r path mode; do
+    if [[ -z "$sub_path" || "$path" == "${sub_path%/}/"* ]]; then
+      [[ "$mode" != 120000 ]] || die "SKILL.md must be a regular file: $path"
+      api_file "$path" "$mode"
+    fi
+  done < <(jq -r '.tree[] | select(.type == "blob" and (.path == "SKILL.md" or (.path | endswith("/SKILL.md")))) | [.path, .mode] | @tsv' "$_UPS_API_TREE")
+}
+
+download_api_skill() {
+  local prefix="${1#"$_UPS_API_SRC"}" path mode
+  prefix="${prefix#/}"
+  [[ -z "$prefix" ]] || prefix+="/"
+  while IFS=$'\t' read -r path mode; do
+    if [[ ! -f "$_UPS_API_SRC/$path" && ! -L "$_UPS_API_SRC/$path" ]]; then
+      api_file "$path" "$mode"
+    fi
+  done < <(jq -r --arg prefix "$prefix" '.tree[] | select(.type == "blob" and (.path | startswith($prefix))) | [.path, .mode] | @tsv' "$_UPS_API_TREE")
+}
+
 copy_tree() {
   # $1: src dir, $2: dest dir
   local src="$1" dest="$2"
   if command -v rsync >/dev/null 2>&1; then
     rsync -a "$src/" "$dest/"
-  else
+  elif command -v tar >/dev/null 2>&1; then
     tar -C "$src" -cf - . | tar -C "$dest" -xpf -
+  else
+    cp -a "$src/." "$dest/"
   fi
 }
 
@@ -207,7 +295,7 @@ discover_skill_files() {
   local search_dir="$1"
 
   while IFS= read -r -d '' skill_file; do
-    local skill_dir skill_name name description
+    local skill_dir skill_name name="" description="" frontmatter
     skill_dir=$(dirname "$skill_file")
     skill_name=$(basename "$skill_dir")
 
@@ -290,6 +378,10 @@ copy_skill() {
   skill_dir=$(dirname "$skill_file")
   skill_name=$(basename "$skill_dir")
 
+  if [[ -n "${_UPS_API_TREE:-}" && ( ! -d "$dest_dir/$skill_name" || -n "$force" ) ]]; then
+    download_api_skill "$skill_dir"
+  fi
+
   # Check if destination already exists
   if [[ -d "$dest_dir/$skill_name" ]]; then
     if [[ -n "$force" ]]; then
@@ -305,7 +397,7 @@ copy_skill() {
 
   # Copy the entire skill directory
   mkdir -p "$dest_dir/$skill_name"
-  copy_tree "$skill_dir" "$dest_dir/$skill_name"
+  copy_tree "$skill_dir" "$dest_dir/$skill_name" || die "Could not copy skill: $skill_name"
 
   log "${prefix}Installed skill: $skill_name"
 }
@@ -316,6 +408,8 @@ list_local_skills() {
     ".agents/skills|project (.agents/skills)"
     ".skills|project (.skills)"
     ".claude/skills|legacy (.claude)"
+    "$HOME/.pi/agent/skills|personal (~/.pi/agent/skills)"
+    ".pi/skills|project (.pi/skills; trusted folders only)"
     "$HOME/.agents/skills|personal (~/.agents/skills)"
     "$HOME/.skills|personal (~/.skills)"
     "$HOME/.claude/skills|legacy (~/.claude)"
@@ -404,6 +498,8 @@ find_skill() {
   # $1: skill name
   local name="$1"
   local -a search_dirs=(
+    "${HOME}/.pi/agent/skills/${name}/SKILL.md"
+    ".pi/skills/${name}/SKILL.md"
     ".agents/skills/${name}/SKILL.md"
     ".skills/${name}/SKILL.md"
     "${HOME}/.agents/skills/${name}/SKILL.md"
@@ -424,6 +520,8 @@ skill_source_label() {
   # Given a SKILL.md path, return a human-readable source label.
   local path="$1"
   case "$path" in
+    "${HOME}/.pi/agent/skills/"*) echo "personal (~/.pi/agent/skills)" ;;
+    .pi/skills/*) echo "project (.pi/skills; trusted folders only)" ;;
     .agents/skills/*) echo "project (.agents/skills)" ;;
     .skills/*) echo "project (.skills)" ;;
     .claude/skills/*) echo "project (.claude/skills)" ;;
@@ -896,7 +994,7 @@ main() {
       -g|--global) global_install=1; shift ;;
       -b|--branch) branch="$2"; shift 2 ;;
       -p|--path) sub_path="$2"; shift 2 ;;
-      --dest-path) dest_path="$2"; shift 2 ;;
+      --dest|--dest-path) dest_path="$2"; shift 2 ;;
       --list) list_only=1; shift ;;
       --all) install_all=1; shift ;;
       --force) force=1; shift ;;
@@ -936,6 +1034,14 @@ main() {
   # Use inline @branch if -b was not explicitly provided
   branch="${branch:-$branch_from_ref}"
 
+  while [[ "$sub_path" == ./* ]]; do sub_path="${sub_path#./}"; done
+  while [[ "$sub_path" == *//* ]]; do sub_path="${sub_path//\/\//\/}"; done
+  sub_path="${sub_path%/}"
+  [[ "$sub_path" != . ]] || sub_path=""
+  if [[ "$sub_path" == /* || "$sub_path" =~ (^|/)\.\.(/|$) ]]; then
+    die "Path must be within the repository: $sub_path"
+  fi
+
   # Validate mutually exclusive options
   if [[ -n "$list_only" && -n "$install_all" ]]; then
     die "--list and --all are mutually exclusive"
@@ -950,7 +1056,10 @@ main() {
   require_cmd awk
   require_cmd sed
   require_cmd curl
-  require_cmd tar
+
+  if [[ -z "$dest_path" && -n "${SLICC_PAGE_LOOPBACK:-}" ]]; then
+    dest_path="$HOME/.pi/agent/skills"
+  fi
 
   # --- ClawHub install path ---
   if [[ "$source_type" == "clawhub" ]]; then
@@ -1076,7 +1185,14 @@ main() {
     return 1
   }
 
-  if [[ -n "$branch" ]]; then
+  if ! command -v unzip >/dev/null 2>&1 || {
+    command -v jq >/dev/null 2>&1 && {
+      ! command -v git >/dev/null 2>&1 || ! command -v gh >/dev/null 2>&1 || ! command -v tar >/dev/null 2>&1
+    }
+  }; then
+    download_api_repository "$repo" "$branch" "$clone_dir" "$sub_path"
+    zip_ok=1
+  elif [[ -n "$branch" ]]; then
     log "Downloading $repo (ref: $branch) as ZIP ..."
     if _try_zip_download "$branch"; then
       zip_ok=1

@@ -6,8 +6,10 @@ ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." >/dev/null 2>&1 && pwd)
 
 require_cmd() { command -v "$1" >/dev/null 2>&1; }
 
-if ! require_cmd gh; then
-  echo "SKIP: gh CLI not installed" >&2
+bash "$ROOT_DIR/tests/test-portable.sh"
+
+if ! require_cmd curl; then
+  echo "SKIP: curl not installed" >&2
   exit 0
 fi
 

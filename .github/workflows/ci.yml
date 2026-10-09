@@ -22,3 +22,16 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: make ci
+
+  kernel:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Installer and skill installation in the SLICC kernel
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash tests/test-kernel.sh
