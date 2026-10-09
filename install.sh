@@ -2,7 +2,7 @@
 set -Eeo pipefail
 IFS=$'\n\t'
 
-REPO="trieloff/gh-upskill"
+REPO="ai-ecoverse/gh-upskill"
 RAW_ROOT="https://raw.githubusercontent.com/${REPO}/main"
 
 usage() {
@@ -14,7 +14,7 @@ Usage:
 
 Options:
   --prefix <dir>     Install prefix (default: /usr/local or ~/.local)
-  --bin-dir <dir>    Install bin dir (default: <prefix>/bin)
+  --bin-dir <dir>    Install bin dir (default: <prefix>/bin; PNPM_HOME in seven)
   -h, --help         Show help
 USAGE
 }
@@ -30,6 +30,17 @@ while [[ $# -gt 0 ]]; do
     *) echo "Unknown option: $1" >&2; usage; exit 1 ;;
   esac
 done
+
+if [[ -z "$PREFIX" && -z "$BIN_DIR" && -n "${SLICC_PAGE_LOOPBACK:-}" ]]; then
+  BIN_DIR="${PNPM_HOME:-$HOME/.local/share/pnpm}"
+  case ":$PATH:" in
+    *":$BIN_DIR:"*) ;;
+    *)
+      echo "Error: seven's PNPM_HOME ($BIN_DIR) must be on PATH. Set PNPM_HOME or use --bin-dir." >&2
+      exit 1
+      ;;
+  esac
+fi
 
 if [[ -z "$PREFIX" ]]; then
   if [[ ${EUID:-$(id -u)} -eq 0 ]]; then
