@@ -281,6 +281,8 @@ copy_tree() {
   local src="$1" dest="$2"
   if command -v rsync >/dev/null 2>&1; then
     rsync -a "$src/" "$dest/"
+  elif command -v tar >/dev/null 2>&1; then
+    tar -C "$src" -cf - . | tar -C "$dest" -xpf -
   else
     cp -a "$src/." "$dest/"
   fi
