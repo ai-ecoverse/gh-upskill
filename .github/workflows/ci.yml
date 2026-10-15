@@ -6,6 +6,12 @@ on:
   pull_request:
     branches: [ main ]
 
+# Supersede stale runs: a newer push to the same PR or renovate branch cancels
+# the older run; other refs keep at most one pending run.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' || startsWith(github.ref, 'refs/heads/renovate/') }}
+
 jobs:
   build:
     runs-on: ubuntu-latest
