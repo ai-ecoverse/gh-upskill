@@ -3,6 +3,10 @@
 # Covers: folded (>), literal (|), >-, |+, quoted with # and :,
 # and multi-line plain continuation.
 # Each case fails before the fix (ai-ecoverse/gh-upskill#28).
+#
+# Expected values were generated with PyYAML 6.0 (python3 -c yaml.safe_load)
+# and verified byte-for-byte. Trailing newlines from clip/keep chomping are
+# stripped by bash $(), matching PyYAML's output through the same capture.
 set -Eeo pipefail
 IFS=$'\n\t'
 
@@ -98,4 +102,45 @@ echo "Results: $PASS passed, $FAIL failed"
 if [[ $FAIL -gt 0 ]]; then
   exit 1
 fi
+
+# --- 8. PyYAML cross-check (optional, when python3 + PyYAML available) ---
+if python3 -c 'import yaml' 2>/dev/null; then
+  echo ""
+  echo "Test 8: PyYAML byte-for-byte cross-check"
+  yaml_fail=0
+  for d in "$FIXTURES"/*/; do
+    skill=$(basename "$d")
+    path="$d/SKILL.md"
+    [[ -f "$path" ]] || continue
+    for field in name description; do
+      expected=$(python3 -c "
+import yaml, sys
+with open('$path') as f:
+    content = f.read()
+parts = content.split('---', 2)
+fm = yaml.safe_load(parts[1])
+val = fm.get('$field', '')
+if val is None: val = ''
+val = str(val).rstrip('\\n')  # match bash \$() stripping
+sys.stdout.write(val)
+")
+      actual=$(extract_frontmatter_field "$path" "$field")
+      if [[ "$actual" != "$expected" ]]; then
+        echo "  MISMATCH: $skill/$field"
+        printf '    expected hex: %s\n' "$(printf '%s' "$expected" | xxd -p | tr -d '\n')"
+        printf '    actual hex:   %s\n' "$(printf '%s' "$actual" | xxd -p | tr -d '\n')"
+        yaml_fail=1
+      fi
+    done
+  done
+  if [[ $yaml_fail -eq 0 ]]; then
+    echo "  All fields match PyYAML byte-for-byte"
+  else
+    echo "  FAIL: some fields diverge from PyYAML"
+    exit 1
+  fi
+else
+  echo "SKIP: python3/PyYAML not available for cross-check"
+fi
+
 echo "ALL FRONTMATTER TESTS PASSED"
