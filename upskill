@@ -3,7 +3,7 @@ set -Eeo pipefail
 IFS=$'\n\t'
 
 PROGRAM_NAME="upskill"
-VERSION="0.3.1"
+VERSION="0.3.2"
 
 usage() {
   cat <<USAGE
@@ -295,15 +295,14 @@ discover_skill_files() {
   local search_dir="$1"
 
   while IFS= read -r -d '' skill_file; do
-    local skill_dir skill_name name="" description="" frontmatter
+    local skill_dir skill_name name="" description=""
     skill_dir=$(dirname "$skill_file")
     skill_name=$(basename "$skill_dir")
 
     # Try to extract name from YAML frontmatter
     if head -n 1 "$skill_file" | grep -q "^---$"; then
-      frontmatter=$(awk 'BEGIN{inside=0; c=0} /^---$/ {inside=!inside; if(++c==3) exit} inside==1 {print}' "$skill_file")
-      name=$(printf '%s\n' "$frontmatter" | awk -F': *' '/^name:/ {sub(/^name: */,"",$0); print substr($0, index($0,$2))}' 2>/dev/null)
-      description=$(printf '%s\n' "$frontmatter" | awk -F': *' '/^description:/ {sub(/^description: */,"",$0); print substr($0, index($0,$2))}' 2>/dev/null)
+      name=$(extract_frontmatter_field "$skill_file" "name")
+      description=$(extract_frontmatter_field "$skill_file" "description")
     fi
 
     # Output: skill_name|skill_path|description
@@ -432,9 +431,7 @@ list_local_skills() {
 
       # Try to extract name from YAML frontmatter
       if head -n 1 "$skill_file" | grep -q "^---$"; then
-        local frontmatter
-        frontmatter=$(awk 'BEGIN{inside=0; c=0} /^---$/ {inside=!inside; if(++c==3) exit} inside==1 {print}' "$skill_file")
-        name=$(printf '%s\n' "$frontmatter" | awk '/^name:/ {sub(/^name: */, ""); print}' 2>/dev/null)
+        name=$(extract_frontmatter_field "$skill_file" "name")
       fi
 
       # Use directory name as a display path
@@ -533,18 +530,196 @@ skill_source_label() {
 }
 
 extract_frontmatter_field() {
-  # Extract a field value from YAML frontmatter.
+  # Extract a scalar field value from YAML frontmatter, handling all YAML
+  # scalar styles: plain, single-quoted, double-quoted, folded (>), and
+  # literal (|) block scalars with chomping indicators.
   # $1: file path, $2: field name
   local file="$1" field="$2"
   if head -n 1 "$file" | grep -q "^---$"; then
-    awk -v f="$field" '
-      BEGIN{inside=0; c=0}
-      /^---$/ {inside=!inside; if(++c==3) exit; next}
-      inside==1 && $0 ~ "^" f ": " {
-        sub("^" f ": *", "", $0)
-        print
-        exit
+    awk -v field="$field" '
+BEGIN { state = "search"; value = ""; bi = 0; bt = ""; chomp = "clip"; printed = 0 }
+
+function emit() {
+  if (printed) return
+  printed = 1
+  # Apply chomping and print
+  if (bt != "") {
+    if (chomp == "strip") {
+      sub(/\n+$/, "", value)
+    } else if (chomp == "keep") {
+      # Preserve trailing blank lines
+      value = value trailing
+    }
+    # clip (default): strip trailing newlines; we omit the single \n for display
+    if (chomp != "keep") sub(/\n+$/, "", value)
+  }
+  print value
+}
+
+/^---$/ {
+  if (state == "search") { next }
+  # Second --- ends frontmatter
+  if (state != "search") { emit(); exit }
+}
+
+state == "search" {
+  # Match field: at start of line
+  pat = "^" field ":"
+  if ($0 !~ pat) next
+  rest = $0
+  sub(pat, "", rest)
+  # YAML requires space or EOL after colon for a mapping value
+  if (rest != "" && substr(rest, 1, 1) != " ") next
+  sub(/^ /, "", rest)
+
+  # Empty value after colon
+  if (rest == "") { state = "done"; next }
+
+  # Block scalar indicator: > or | with optional chomp/indent indicators
+  if (rest ~ /^[>|]/) {
+    bt = (substr(rest, 1, 1) == ">") ? "folded" : "literal"
+    ind = substr(rest, 2)
+    sub(/ +#.*$/, "", ind)  # strip trailing comment
+    chomp = "clip"
+    bi = 0
+    for (i = 1; i <= length(ind); i++) {
+      c = substr(ind, i, 1)
+      if (c == "-") chomp = "strip"
+      else if (c == "+") chomp = "keep"
+      else if (c+0 >= 1 && c+0 <= 9) bi = c+0
+    }
+    state = "block"
+    next
+  }
+
+  # Double-quoted scalar
+  if (substr(rest, 1, 1) == "\"") {
+    s = substr(rest, 2)
+    result = ""
+    found_end = 0
+    while (!found_end) {
+      for (i = 1; i <= length(s); i++) {
+        c = substr(s, i, 1)
+        if (c == "\\") {
+          nc = substr(s, i+1, 1)
+          if (nc == "n") result = result "\n"
+          else if (nc == "t") result = result "\t"
+          else if (nc == "\\\\") result = result "\\\\"
+          else if (nc == "\"") result = result "\""
+          else result = result nc
+          i++
+        } else if (c == "\"") {
+          found_end = 1
+          break
+        } else {
+          result = result c
+        }
       }
+      if (!found_end) {
+        if ((getline s) <= 0) break
+        result = result " "
+      }
+    }
+    value = result
+    emit()
+    exit
+  }
+
+  # Single-quoted scalar
+  if (substr(rest, 1, 1) == "\047") {
+    s = substr(rest, 2)
+    result = ""
+    found_end = 0
+    while (!found_end) {
+      for (i = 1; i <= length(s); i++) {
+        c = substr(s, i, 1)
+        if (c == "\047") {
+          if (substr(s, i+1, 1) == "\047") {
+            result = result "\047"
+            i++
+          } else {
+            found_end = 1
+            break
+          }
+        } else {
+          result = result c
+        }
+      }
+      if (!found_end) {
+        if ((getline s) <= 0) break
+        result = result " "
+      }
+    }
+    value = result
+    emit()
+    exit
+  }
+
+  # Plain scalar – remove inline comment (" #" not inside the value)
+  sub(/ +#.*$/, "", rest)
+  value = rest
+  state = "plain"
+  next
+}
+
+state == "plain" {
+  # Continuation: must be indented AND not look like a new key or end marker
+  if (/^[ \t]/ && !/^---$/) {
+    line = $0; sub(/^[ \t]+/, "", line)
+    # Stop if this is a new mapping key at any indent
+    if (line ~ /^[a-zA-Z_][a-zA-Z0-9_-]*:( |$)/) { emit(); exit }
+    sub(/ +#.*$/, "", line)
+    if (value != "") value = value " "
+    value = value line
+  } else {
+    emit(); exit
+  }
+  next
+}
+
+state == "block" {
+  # Empty lines within a block
+  if (/^[ \t]*$/) {
+    if (bi > 0 || value != "") {
+      # Track trailing empties
+      trailing = trailing "\n"
+    }
+    next
+  }
+  # Determine indentation of this line
+  match($0, /^ */)
+  actual_indent = RLENGTH
+  # First content line sets block indent if not explicit
+  if (bi == 0) {
+    if (actual_indent == 0) { emit(); exit }
+    bi = actual_indent
+  }
+  if (actual_indent < bi) {
+    # Less indented → end of block
+    emit(); exit
+  }
+  content = substr($0, bi + 1)
+  # Flush pending empty lines
+  if (trailing != "") {
+    value = value trailing
+    trailing = ""
+  }
+  if (value == "") {
+    value = content
+  } else if (bt == "folded") {
+    # Folded: single newline → space; double+ newline preserved above
+    last = substr(value, length(value))
+    if (last == "\n") value = value content
+    else value = value " " content
+  } else {
+    value = value "\n" content
+  }
+  next
+}
+
+END {
+  if (state != "search" && state != "done") emit()
+}
     ' "$file"
   fi
 }

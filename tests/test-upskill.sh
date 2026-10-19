@@ -7,6 +7,7 @@ ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." >/dev/null 2>&1 && pwd)
 require_cmd() { command -v "$1" >/dev/null 2>&1; }
 
 bash "$ROOT_DIR/tests/test-portable.sh"
+bash "$ROOT_DIR/tests/test-frontmatter.sh"
 
 if ! require_cmd curl; then
   echo "SKIP: curl not installed" >&2
