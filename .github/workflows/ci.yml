@@ -36,7 +36,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
         with:
-          node-version: 24
+          node-version: 26
       - name: Installer and skill installation in the SLICC kernel
         env:
           GH_TOKEN: ${{ github.token }}
