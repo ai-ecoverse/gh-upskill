@@ -58,6 +58,34 @@ try {
     test -s "$HOME/.pi/agent/skills/docs-search/scripts/search.js"
     upskill adobe/helix-website --path .claude/skills/docs-search --skill "Searching AEM Documentation" --dest /home/explicit
     test -f /home/explicit/docs-search/SKILL.md
+    jq -e '.kind == "github" and .source == "adobe/helix-website" and (.sha | test("^[0-9a-f]{40}$")) and (.files | index("SKILL.md"))' "$HOME/.pi/agent/skills/docs-search/.upskill"
+    upskill list > /home/list.log
+    grep -q 'adobe/helix-website@' /home/list.log
+    # Motivating case: a SLICC 6 install of slack at 1fd7a31, with state files,
+    # updated to current main without losing the state.
+    S=/usr/share/skills
+    old=1fd7a319946c495c6ed95c79a43143fabf0fe0e4
+    upskill ai-ecoverse/skills -b "$old" --path skills/slack --all --dest "$S"
+    jq -e --arg old "$old" '.sha == $old and .ref == $old and .path == "skills/slack"' "$S/slack/.upskill"
+    test -f "$S/slack/scripts/slack-support.jsh"
+    jq -c '{kind, source, skill, path, sha, version, installed, files}' "$S/slack/.upskill" > /home/slicc6-marker
+    cp /home/slicc6-marker "$S/slack/.upskill"
+    echo '{"ts":"1"}' > "$S/slack/.last-post-C1.json"
+    echo '{"w":1}' > "$S/slack/.watch-C1.json"
+    echo '{"e":1}' > "$S/slack/emoji-cache.json"
+    upskill info slack --dest "$S" > /home/info.log
+    grep -q 'Commit: 1fd7a31' /home/info.log
+    upskill outdated --dest "$S" > /home/outdated.log
+    grep -q '^  slack  *1fd7a31' /home/outdated.log
+    upskill update slack --dest "$S"
+    test ! -e "$S/slack/scripts/slack-support.jsh"
+    test -f "$S/slack/scripts/slack-support"
+    grep -q '"ts":"1"' "$S/slack/.last-post-C1.json"
+    test -f "$S/slack/.watch-C1.json"
+    test -f "$S/slack/emoji-cache.json"
+    jq -e --arg old "$old" '.sha != $old and (.sha | test("^[0-9a-f]{40}$")) and (.files | index("scripts/slack-support.jsh") | not)' "$S/slack/.upskill"
+    upskill outdated --dest "$S" > /home/outdated-after.log
+    grep -q 'up to date' /home/outdated-after.log
   `], {cwd: '/home'});
   process.stdout.write(result.stdout);
   process.stderr.write(result.stderr);
