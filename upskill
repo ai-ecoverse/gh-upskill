@@ -455,7 +455,11 @@ write_marker() {
       sep=","
     done <"$files"
     if [[ -n "$sep" ]]; then printf '\n  ]\n}\n'; else printf ']\n}\n'; fi
-  } >"$tmp" && mv -f "$tmp" "$dir/$MARKER_FILE"
+  } >"$tmp" || return 1
+  # The SLICC kernel's mv refuses to replace an existing file ("are the same
+  # file"), so remove the old marker first.
+  rm -f "$dir/$MARKER_FILE"
+  mv -f "$tmp" "$dir/$MARKER_FILE"
 }
 
 has_dot_segment() {
