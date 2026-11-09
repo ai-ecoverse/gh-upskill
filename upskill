@@ -3,7 +3,7 @@ set -Eeo pipefail
 IFS=$'\n\t'
 
 PROGRAM_NAME="upskill"
-VERSION="0.3.2"
+VERSION="0.4.0"
 
 usage() {
   cat <<USAGE
@@ -13,18 +13,22 @@ Implements the agentskills.io specification: https://agentskills.io
 
 Usage:
   ${PROGRAM_NAME} [-i] [-g] <owner/repo[@branch]> [-b <branch>] [--path <subfolder>] [--dest-path <path>] [--list] [--skill <name>] [--all]
-  ${PROGRAM_NAME} list
-  ${PROGRAM_NAME} info <name>
+  ${PROGRAM_NAME} list [--dest <path>]
+  ${PROGRAM_NAME} info <name> [--dest <path>]
   ${PROGRAM_NAME} read <name>
+  ${PROGRAM_NAME} outdated [--dest <path>]
+  ${PROGRAM_NAME} update <name>... | --all [--dest <path>] [--force]
   ${PROGRAM_NAME} clawhub:<slug>
   ${PROGRAM_NAME} https://clawhub.ai/<user>/<slug>
   ${PROGRAM_NAME} tessl:<name>
   ${PROGRAM_NAME} search <query>
 
 Subcommands:
-  list                          List locally installed/discovered skills
+  list                          List locally installed/discovered skills and where they came from
   info <name>                   Show details about a locally installed skill
   read <name>                   Print the SKILL.md content of a locally installed skill
+  outdated                      List installed skills whose source has newer commits for their path
+  update <name>... | --all      Update installed skills in place from the source in their .upskill marker
   search <query>                Search ClawHub and Tessl skill registries
 
 Install sources:
@@ -49,6 +53,9 @@ Examples:
   ${PROGRAM_NAME} tessl:postgres-pro                         # Install from Tessl registry
   ${PROGRAM_NAME} info pdf                                   # Show skill details
   ${PROGRAM_NAME} read pdf                                   # Print SKILL.md content
+  ${PROGRAM_NAME} outdated --dest /usr/share/skills          # What can be updated
+  ${PROGRAM_NAME} update slack --dest /usr/share/skills      # Update one skill in place
+  ${PROGRAM_NAME} update --all                               # Update every tracked skill
 
 Options:
   -i                        Add created files to .gitignore
@@ -59,7 +66,8 @@ Options:
   --list                    List available skills without installing
   --skill <name>            Install specific skill(s) (can be used multiple times)
   --all                     Install all skills from SKILL.md files
-  --force                   Overwrite existing skill directories
+  --force                   Replace existing skill directories that have no .upskill marker
+                            (for update: re-download even when up to date)
   -q, --quiet               Reduce output
   -h, --help                Show help
   -v, --version             Show version
@@ -74,6 +82,11 @@ Note: You can specify a branch inline with owner/repo@branch syntax.
       Uses curl + jq and GitHub REST trees/files when git, gh, tar or unzip is missing.
       Without jq, unzip-based installs remain available.
       Otherwise downloads ZIP archives and falls back to gh repo clone.
+
+      Every install writes a .upskill marker (source, path, resolved commit, files) into
+      the skill folder. Reinstalling over a marked folder updates it in place: new files
+      are written, files the old marker lists but upstream dropped are removed, and
+      everything else (skill state, existing dotfiles) is left alone.
 
       Authentication: GITHUB_TOKEN, then GH_TOKEN, then 'gh auth token'.
       If rate-limited, set GITHUB_TOKEN/GH_TOKEN or authenticate with gh auth login.
@@ -242,7 +255,7 @@ download_api_repository() {
   _UPS_API_REPO="$1"
   local ref="$2" sub_path="$4" encoded path mode
   _UPS_API_SRC="$3"
-  _UPS_API_TREE="$_UPS_TMPDIR/tree.json"
+  _UPS_API_TREE="$(dirname "$_UPS_API_SRC")/tree.json"
   if [[ -z "$ref" ]]; then
     github_api_request "https://api.github.com/repos/$_UPS_API_REPO"
     ref=$(printf '%s' "$_GITHUB_CURL_BODY" | jq -er '.default_branch')
@@ -287,6 +300,250 @@ copy_tree() {
   else
     cp -a "$src/." "$dest/"
   fi
+}
+
+# --- Install markers (.upskill) ---
+#
+# Every install writes a .upskill JSON marker into the skill folder, in the
+# format SLICC 6's built-in upskill wrote, so either tool can read the other's:
+#   {"kind":"github","source":"owner/repo","skill":"name","path":"skills/name",
+#    "ref":"<only with --branch>","sha":"<resolved commit>","version":1,
+#    "installed":"<ISO-8601>","files":["SKILL.md",...]}
+# ClawHub installs use kind "clawhub" and record the published version as
+# "release". "files" lists what upskill wrote, relative to the skill folder:
+# an update may delete those files when upstream drops them, and never touches
+# anything else (skill state such as caches or credentials).
+
+MARKER_FILE=".upskill"
+MARKER_VERSION=1
+
+marker_dump() {
+  # Print a marker's top-level fields as "key<TAB>value" lines; elements of
+  # an array print as "key[]<TAB>value". Accepts compact and pretty-printed
+  # JSON (SLICC 6 wrote both). Prints nothing and fails for invalid JSON.
+  [[ -f "$1" ]] || return 1
+  awk '
+{ buf = buf $0 "\n" }
+function ch() { return substr(buf, i, 1) }
+function ws() { while (i <= n && index(" \t\r\n", substr(buf, i, 1)) > 0) i++ }
+function str(   s, c, e) {
+  s = ""; i++
+  while (i <= n) {
+    c = substr(buf, i, 1)
+    if (c == "\\") {
+      e = substr(buf, i + 1, 1); i += 2
+      if (e == "n") s = s "\n"; else if (e == "t") s = s "\t"; else if (e == "r") s = s "\r"
+      else if (e == "u") { s = s "?"; i += 4 }
+      else if (e != "b" && e != "f") s = s e
+      continue
+    }
+    i++
+    if (c == "\"") return s
+    s = s c
+  }
+  bad = 1
+  return s
+}
+function lit(   s) {
+  s = ""
+  while (i <= n && index(",]} \t\r\n", substr(buf, i, 1)) == 0) { s = s substr(buf, i, 1); i++ }
+  if (s == "") bad = 1
+  return s
+}
+function skip(   depth, c) {
+  depth = 0
+  while (i <= n && !bad) {
+    c = ch()
+    if (c == "\"") { str(); continue }
+    i++
+    if (c == "{" || c == "[") depth++
+    else if (c == "}" || c == "]") { if (--depth == 0) return }
+  }
+  bad = 1
+}
+function emit(k, v) { if (v !~ /[\n\t]/) out = out k "\t" v "\n" }
+END {
+  n = length(buf); i = 1; ws()
+  if (ch() != "{") exit 1
+  i++
+  while (i <= n && !bad) {
+    ws(); c = ch()
+    if (c == "}") { printf "%s", out; exit 0 }
+    if (c == ",") { i++; continue }
+    if (c != "\"") exit 1
+    key = str(); ws()
+    if (ch() != ":") exit 1
+    i++; ws(); c = ch()
+    if (c == "\"") emit(key, str())
+    else if (c == "{") skip()
+    else if (c == "[") {
+      i++
+      while (i <= n && !bad) {
+        ws(); c = ch()
+        if (c == "]") { i++; break }
+        if (c == ",") { i++; continue }
+        if (c == "\"") emit(key "[]", str())
+        else if (c == "{" || c == "[") skip()
+        else emit(key "[]", lit())
+      }
+    }
+    else emit(key, lit())
+  }
+  exit 1
+}' "$1" 2>/dev/null
+}
+
+marker_get() {
+  # $1: marker file, $2: top-level key. Prints the value (empty if absent).
+  marker_dump "$1" | awk -v k="$2" 'index($0, k "\t") == 1 { print substr($0, length(k) + 2); exit }' || true
+}
+
+marker_files() {
+  # $1: marker file. Prints the recorded files, one per line.
+  marker_dump "$1" | awk 'index($0, "files[]\t") == 1 { print substr($0, 9) }' || true
+}
+
+marker_valid() {
+  # A marker is usable when it parses and names its kind and source.
+  local dump
+  dump=$(marker_dump "$1") || return 1
+  printf '%s\n' "$dump" | grep -q $'^kind\t.' && printf '%s\n' "$dump" | grep -q $'^source\t.'
+}
+
+marker_label() {
+  # $1: skill dir. Prints e.g. "owner/repo@1fd7a31", "clawhub:slug@1.0.0" or "-".
+  local m="$1/$MARKER_FILE" kind source sha release
+  marker_valid "$m" || { printf -- '-'; return 0; }
+  kind=$(marker_get "$m" kind)
+  source=$(marker_get "$m" source)
+  sha=$(marker_get "$m" sha)
+  release=$(marker_get "$m" release)
+  if [[ "$kind" == github ]]; then
+    printf '%s%s' "$source" "${sha:+@${sha:0:7}}"
+  else
+    printf '%s:%s%s' "$kind" "$source" "${release:+@$release}"
+  fi
+}
+
+json_str() {
+  local s="$1"
+  s=${s//\\/\\\\}
+  s=${s//\"/\\\"}
+  s=${s//$'\n'/\\n}
+  s=${s//$'\r'/\\r}
+  s=${s//$'\t'/\\t}
+  printf '"%s"' "$s"
+}
+
+write_marker() {
+  # $1: skill dir, $2: kind, $3: source, $4: skill name, $5: ref, $6: path,
+  # $7: sha, $8: release, $9: file listing the installed files
+  local dir="$1" kind="$2" source="$3" skill="$4" ref="$5" path="$6" sha="$7" release="$8" files="$9"
+  local tmp="$dir/$MARKER_FILE.tmp" installed="" sep="" f
+  installed=$(date -u +%Y-%m-%dT%H:%M:%S.000Z 2>/dev/null) || installed=""
+  {
+    printf '{\n  "kind": %s,\n  "source": %s,\n  "skill": %s,\n' "$(json_str "$kind")" "$(json_str "$source")" "$(json_str "$skill")"
+    [[ -z "$ref" ]] || printf '  "ref": %s,\n' "$(json_str "$ref")"
+    [[ "$kind" != github ]] || printf '  "path": %s,\n' "$(json_str "$path")"
+    [[ -z "$sha" ]] || printf '  "sha": %s,\n' "$(json_str "$sha")"
+    [[ -z "$release" ]] || printf '  "release": %s,\n' "$(json_str "$release")"
+    printf '  "version": %s,\n' "$MARKER_VERSION"
+    [[ -z "$installed" ]] || printf '  "installed": %s,\n' "$(json_str "$installed")"
+    printf '  "files": ['
+    while IFS= read -r f; do
+      printf '%s\n    %s' "$sep" "$(json_str "$f")"
+      sep=","
+    done <"$files"
+    if [[ -n "$sep" ]]; then printf '\n  ]\n}\n'; else printf ']\n}\n'; fi
+  } >"$tmp" && mv -f "$tmp" "$dir/$MARKER_FILE"
+}
+
+has_dot_segment() {
+  [[ "/$1" == */.* ]]
+}
+
+list_tree_files() {
+  # $1: dir. Prints files and symlinks relative to it, excluding the marker.
+  local -a sorter=(cat)
+  if command -v sort >/dev/null 2>&1; then sorter=(env LC_ALL=C sort); fi
+  (cd "$1" && find . \( -type f -o -type l \) -print) | sed 's|^\./||' |
+    grep -v -e '^\.upskill$' -e '^\.upskill\.tmp$' -e '^\.git/' | "${sorter[@]}" || true
+}
+
+safe_skill_path() {
+  # $1: path from a marker, $2: skill dir. True when deleting it stays inside
+  # the skill dir: relative, no "."/".." segments, no symlinked parent.
+  local rel="$1" root="$2" rest acc="" part
+  [[ -n "$rel" && "$rel" != /* && "$rel" != "$MARKER_FILE" ]] || return 1
+  [[ ! "$rel" =~ (^|/)\.\.?(/|$) && "$rel" != *//* ]] || return 1
+  [[ "$rel" == */* ]] || return 0
+  rest="${rel%/*}"
+  while [[ -n "$rest" ]]; do
+    part="${rest%%/*}"
+    if [[ "$rest" == */* ]]; then rest="${rest#*/}"; else rest=""; fi
+    acc="${acc:+$acc/}$part"
+    [[ ! -L "$root/$acc" ]] || return 1
+  done
+}
+
+prune_empty_parents() {
+  # $1: skill dir, $2: removed relative path. Removes now-empty parent dirs.
+  local dir="$2"
+  while [[ "$dir" == */* ]]; do
+    dir="${dir%/*}"
+    rmdir "$1/$dir" 2>/dev/null || return 0
+  done
+}
+
+place_skill() {
+  # Install or update one skill folder from a source directory.
+  # $1: source dir, $2: target dir, $3: force, $4: log prefix, $5: skill name
+  # With a .upskill marker in the target, updates in place: writes the new
+  # files, deletes files the old marker lists that upstream dropped, keeps
+  # everything else and every existing dotfile. Without one, the target is
+  # skipped, or replaced with --force.
+  # Sets _UPS_PLACED_FILES (file listing what was installed) and
+  # _UPS_PLACE_MODE (installed|updated). Returns 1 when skipped.
+  local src="$1" target="$2" force="$3" prefix="$4" name="$5" rel new_list
+  new_list=$(mktemp "$_UPS_TMPDIR/files.XXXXXX")
+  list_tree_files "$src" >"$new_list"
+  _UPS_PLACE_MODE=installed
+  if [[ -d "$target" ]]; then
+    if marker_valid "$target/$MARKER_FILE"; then
+      _UPS_PLACE_MODE=updated
+      log "${prefix}Updating skill in place: $name"
+      # Stage a copy so existing dotfiles (credentials, state) can be left out.
+      local stage
+      stage=$(mktemp -d "$_UPS_TMPDIR/stage.XXXXXX")
+      copy_tree "$src" "$stage" || die "Could not stage skill: $name"
+      while IFS= read -r rel; do
+        if has_dot_segment "$rel" && [[ -e "$target/$rel" || -L "$target/$rel" ]]; then
+          rm -f "$stage/$rel"
+        fi
+      done <"$new_list"
+      while IFS= read -r rel; do
+        if grep -Fxq -- "$rel" "$new_list" || has_dot_segment "$rel" || ! safe_skill_path "$rel" "$target"; then
+          continue
+        fi
+        if [[ -f "$target/$rel" || -L "$target/$rel" ]]; then
+          rm -f "$target/$rel"
+          log "${prefix}  removed $rel (dropped upstream)"
+          prune_empty_parents "$target" "$rel"
+        fi
+      done < <(marker_files "$target/$MARKER_FILE")
+      src="$stage"
+    elif [[ -n "$force" ]]; then
+      log "${prefix}Overwriting existing skill: $name"
+      rm -rf "${target:?}"
+    else
+      log "${prefix}Skipped skill: $name (already exists; no $MARKER_FILE marker, use --force to replace)"
+      rm -f "$new_list"
+      return 1
+    fi
+  fi
+  mkdir -p "$target"
+  copy_tree "$src" "$target" || die "Could not copy skill: $name"
+  _UPS_PLACED_FILES="$new_list"
 }
 
 discover_skill_files() {
@@ -368,54 +625,91 @@ list_skills() {
 copy_skill() {
   # $1: skill file path, $2: destination skills dir, $3: force flag (optional)
   # $4: progress prefix (optional, e.g. "[1/5] ")
+  # $5: destination folder name (optional, defaults to the source folder name)
   local skill_file="$1"
   local dest_dir="$2"
   local force="${3:-}"
   local prefix="${4:-}"
-  local skill_dir skill_name
+  local skill_dir skill_name target
 
   skill_dir=$(dirname "$skill_file")
-  skill_name=$(basename "$skill_dir")
+  skill_name="${5:-$(basename "$skill_dir")}"
+  target="$dest_dir/$skill_name"
 
-  if [[ -n "${_UPS_API_TREE:-}" && ( ! -d "$dest_dir/$skill_name" || -n "$force" ) ]]; then
+  if [[ -d "$target" && -z "$force" ]] && ! marker_valid "$target/$MARKER_FILE"; then
+    log "${prefix}Skipped skill: $skill_name (already exists; no $MARKER_FILE marker, use --force to replace)"
+    return 1
+  fi
+
+  if [[ -n "${_UPS_API_TREE:-}" ]]; then
     download_api_skill "$skill_dir"
   fi
 
-  # Check if destination already exists
-  if [[ -d "$dest_dir/$skill_name" ]]; then
-    if [[ -n "$force" ]]; then
-      log "${prefix}Overwriting existing skill: $skill_name"
-      rm -rf "${dest_dir:?}/${skill_name:?}"
-    else
-      log "${prefix}Skipped skill: $skill_name (already exists)"
-      return 1
-    fi
+  [[ -d "$target" ]] || log "${prefix}Installing skill: $skill_name"
+  place_skill "$skill_dir" "$target" "$force" "$prefix" "$skill_name" || return 1
+
+  # Repo-relative folder the skill came from
+  local rel_path="${skill_dir#"$_UPS_SRC_ROOT"}"
+  rel_path="${rel_path#/}"
+  write_marker "$target" github "$_UPS_SRC_REPO" "$skill_name" "${_UPS_SRC_REF:-}" "$rel_path" "${_UPS_SRC_SHA:-}" "" "$_UPS_PLACED_FILES"
+
+  if [[ "$_UPS_PLACE_MODE" == updated ]]; then
+    log "${prefix}Updated skill: $skill_name${_UPS_SRC_SHA:+ (${_UPS_SRC_SHA:0:7})}"
+  else
+    log "${prefix}Installed skill: $skill_name"
   fi
+}
 
-  log "${prefix}Installing skill: $skill_name"
+skill_dir_entries() {
+  # Print "dir|label" for each local skill directory searched by list,
+  # outdated and update. $1: custom dir (--dest), replaces the defaults.
+  if [[ -n "${1:-}" ]]; then
+    printf '%s|%s\n' "${1%/}" "custom (${1%/})"
+    return 0
+  fi
+  printf '%s\n' \
+    ".agents/skills|project (.agents/skills)" \
+    ".skills|project (.skills)" \
+    ".claude/skills|legacy (.claude)" \
+    "$HOME/.pi/agent/skills|personal (~/.pi/agent/skills)" \
+    ".pi/skills|project (.pi/skills; trusted folders only)" \
+    "$HOME/.agents/skills|personal (~/.agents/skills)" \
+    "$HOME/.skills|personal (~/.skills)" \
+    "$HOME/.claude/skills|legacy (~/.claude)"
+}
 
-  # Copy the entire skill directory
-  mkdir -p "$dest_dir/$skill_name"
-  copy_tree "$skill_dir" "$dest_dir/$skill_name" || die "Could not copy skill: $skill_name"
-
-  log "${prefix}Installed skill: $skill_name"
+parse_dest_arg() {
+  # Parse "[--dest D] [extra...]" style args. Sets _UPS_ARG_DEST and
+  # _UPS_ARGS (remaining positional args); flags in $1 (space separated)
+  # are accepted and recorded in _UPS_ARG_FLAGS.
+  local allowed=" $1 "
+  shift
+  _UPS_ARG_DEST="" _UPS_ARG_FLAGS=" "
+  _UPS_ARGS=()
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --dest|--dest-path)
+        [[ -n "${2:-}" ]] || die "$1 requires a path"
+        _UPS_ARG_DEST="$2"; shift 2 ;;
+      -q|--quiet) QUIET=1; shift ;;
+      -*)
+        [[ "$allowed" == *" $1 "* ]] || die "Unknown option: $1"
+        _UPS_ARG_FLAGS+="$1 "; shift ;;
+      *) _UPS_ARGS+=("$1"); shift ;;
+    esac
+  done
 }
 
 list_local_skills() {
   # Scan local skill directories and display a table of discovered skills.
-  local -a skill_dirs=(
-    ".agents/skills|project (.agents/skills)"
-    ".skills|project (.skills)"
-    ".claude/skills|legacy (.claude)"
-    "$HOME/.pi/agent/skills|personal (~/.pi/agent/skills)"
-    ".pi/skills|project (.pi/skills; trusted folders only)"
-    "$HOME/.agents/skills|personal (~/.agents/skills)"
-    "$HOME/.skills|personal (~/.skills)"
-    "$HOME/.claude/skills|legacy (~/.claude)"
-  )
+  parse_dest_arg "" "$@"
+  local -a skill_dirs=()
+  local entry
+  while IFS= read -r entry; do skill_dirs+=("$entry"); done < <(skill_dir_entries "$_UPS_ARG_DEST")
 
   local -a names=()
   local -a sources=()
+  local -a origins=()
   local -a paths=()
   local total=0
 
@@ -445,6 +739,7 @@ list_local_skills() {
 
       names+=("${name:-$skill_name}")
       sources+=("$source_label")
+      origins+=("$(marker_label "$skill_dir")")
       paths+=("$display_path")
       total=$((total + 1))
     done < <(find "$dir" -type f -name 'SKILL.md' -print0 2>/dev/null)
@@ -464,26 +759,27 @@ list_local_skills() {
   fi
 
   # Calculate column widths
-  local max_name=4 max_source=6 max_path=4
+  local max_name=4 max_source=6 max_origin=4 max_path=4
   for ((i = 0; i < total; i++)); do
-    local nl=${#names[$i]} sl=${#sources[$i]} pl=${#paths[$i]}
+    local nl=${#names[$i]} sl=${#sources[$i]} ol=${#origins[$i]} pl=${#paths[$i]}
     [[ $nl -gt $max_name ]] && max_name=$nl
     [[ $sl -gt $max_source ]] && max_source=$sl
+    [[ $ol -gt $max_origin ]] && max_origin=$ol
     [[ $pl -gt $max_path ]] && max_path=$pl
   done
 
   echo "Discoverable local skills:"
   echo ""
   # Header
-  printf "  %-${max_name}s  %-${max_source}s  %s\n" "NAME" "SOURCE" "PATH"
+  printf "  %-${max_name}s  %-${max_source}s  %-${max_origin}s  %s\n" "NAME" "SOURCE" "FROM" "PATH"
   # Separator line
-  local sep_len=$((max_name + max_source + max_path + 6))
+  local sep_len=$((max_name + max_source + max_origin + max_path + 8))
   printf '  '
   for ((i = 0; i < sep_len; i++)); do printf '%s' "-"; done
   printf '\n'
 
   for ((i = 0; i < total; i++)); do
-    printf "  %-${max_name}s  %-${max_source}s  %s\n" "${names[$i]}" "${sources[$i]}" "${paths[$i]}"
+    printf "  %-${max_name}s  %-${max_source}s  %-${max_origin}s  %s\n" "${names[$i]}" "${sources[$i]}" "${origins[$i]}" "${paths[$i]}"
   done
 
   echo ""
@@ -725,29 +1021,58 @@ END {
 }
 
 cmd_info() {
-  local name="${1:-}"
+  parse_dest_arg "" "$@"
+  local name="${_UPS_ARGS[0]:-}"
   if [[ -z "$name" ]]; then
-    die "Usage: ${PROGRAM_NAME} info <name>"
+    die "Usage: ${PROGRAM_NAME} info <name> [--dest <path>]"
   fi
 
-  local skill_path
-  skill_path=$(find_skill "$name") || {
-    printf '%s: skill "%s" not found\n' "$PROGRAM_NAME" "$name" >&2
-    exit 1
-  }
+  local skill_path source_label
+  if [[ -n "$_UPS_ARG_DEST" ]]; then
+    skill_path="${_UPS_ARG_DEST%/}/$name/SKILL.md"
+    source_label="custom (${_UPS_ARG_DEST%/})"
+    [[ -f "$skill_path" ]] || {
+      printf '%s: skill "%s" not found in %s\n' "$PROGRAM_NAME" "$name" "$_UPS_ARG_DEST" >&2
+      exit 1
+    }
+  else
+    skill_path=$(find_skill "$name") || {
+      printf '%s: skill "%s" not found\n' "$PROGRAM_NAME" "$name" >&2
+      exit 1
+    }
+    source_label=$(skill_source_label "$skill_path")
+  fi
 
   local skill_dir
   skill_dir=$(dirname "$skill_path")
-  local display_name description source_label
+  local display_name description
   display_name=$(extract_frontmatter_field "$skill_path" "name")
   description=$(extract_frontmatter_field "$skill_path" "description")
-  source_label=$(skill_source_label "$skill_path")
 
   echo "Skill: ${display_name:-$name}"
   echo "Path: ${skill_path}"
   echo "Source: ${source_label}"
   if [[ -n "${description:-}" ]]; then
     echo "Description: ${description}"
+  fi
+  local marker="$skill_dir/$MARKER_FILE"
+  if marker_valid "$marker"; then
+    local kind m_source m_path m_ref m_sha m_release m_installed
+    kind=$(marker_get "$marker" kind)
+    m_source=$(marker_get "$marker" source)
+    m_path=$(marker_get "$marker" path)
+    m_ref=$(marker_get "$marker" ref)
+    m_sha=$(marker_get "$marker" sha)
+    m_release=$(marker_get "$marker" release)
+    m_installed=$(marker_get "$marker" installed)
+    echo "Installed from: ${kind}:${m_source}"
+    [[ -z "$m_path" ]] || echo "Upstream path: $m_path"
+    [[ -z "$m_ref" ]] || echo "Ref: $m_ref"
+    [[ -z "$m_sha" ]] || echo "Commit: ${m_sha:0:7} ($m_sha)"
+    [[ -z "$m_release" ]] || echo "Release: $m_release"
+    [[ -z "$m_installed" ]] || echo "Installed at: $m_installed"
+  else
+    echo "Installed from: unknown (no $MARKER_FILE marker)"
   fi
   echo ""
   echo "Contents:"
@@ -789,34 +1114,35 @@ is_skill_installed() {
   return 1
 }
 
+CLAWHUB_API="https://wry-manatee-359.convex.site/api/v1"
+
 install_from_clawhub() {
   # Install a skill from ClawHub by slug.
-  # $1: slug, $2: dest dir, $3: force flag
+  # $1: slug, $2: dest dir, $3: force flag, $4: owner handle (optional)
   local slug="$1"
   local dest_dir="$2"
   local force="${3:-}"
+  local owner="${4:-}"
+  local target="$dest_dir/$slug"
 
   require_cmd curl
 
-  # Check if destination already exists
-  if [[ -d "$dest_dir/$slug" ]]; then
-    if [[ -n "$force" ]]; then
-      log "Overwriting existing skill: $slug"
-      rm -rf "${dest_dir:?}/${slug:?}"
-    else
-      log "Skipped skill: $slug (already exists, use --force to overwrite)"
-      return 0
-    fi
+  # Without a marker, an existing folder is skipped unless --force
+  if [[ -d "$target" && -z "$force" ]] && ! marker_valid "$target/$MARKER_FILE"; then
+    log "Skipped skill: $slug (already exists, use --force to overwrite)"
+    return 0
   fi
 
-  _UPS_TMPDIR=$(mktemp -d)
+  [[ -n "${_UPS_TMPDIR:-}" ]] || _UPS_TMPDIR=$(mktemp -d)
+  local work
+  work=$(mktemp -d "$_UPS_TMPDIR/clawhub.XXXXXX")
   log "Downloading from ClawHub: $slug"
 
-  local zip_url="https://wry-manatee-359.convex.site/api/v1/download?slug=${slug}"
-  local zip_file="$_UPS_TMPDIR/clawhub.zip"
+  local zip_url="${CLAWHUB_API}/download?slug=${slug}${owner:+&ownerHandle=$owner}"
+  local zip_file="$work/clawhub.zip"
 
   local http_status
-  http_status=$(curl -sS -w '%{http_code}' -o "$zip_file" "$zip_url" 2>/dev/null) || true
+  http_status=$(curl -sS -L -w '%{http_code}' -o "$zip_file" "$zip_url" 2>/dev/null) || true
 
   if [[ ! "$http_status" =~ ^2 ]]; then
     die "ClawHub download failed (HTTP ${http_status}) for slug: $slug"
@@ -834,11 +1160,9 @@ install_from_clawhub() {
     die "ClawHub archive contains path traversal entries, refusing to extract: $slug"
   fi
 
-  unzip -q "$zip_file" -d "$_UPS_TMPDIR/clawhub_unzipped" 2>/dev/null || die "Failed to unzip ClawHub archive for: $slug"
+  unzip -q "$zip_file" -d "$work/clawhub_unzipped" 2>/dev/null || die "Failed to unzip ClawHub archive for: $slug"
 
-  # Install into dest_dir/slug, skipping _meta.json
-  mkdir -p "$dest_dir/$slug"
-  local src_dir="$_UPS_TMPDIR/clawhub_unzipped"
+  local src_dir="$work/clawhub_unzipped"
 
   # If there's a single top-level directory, descend into it
   local top_count
@@ -851,13 +1175,22 @@ install_from_clawhub() {
     fi
   fi
 
-  # Copy files, skipping _meta.json
-  find "$src_dir" -mindepth 1 -maxdepth 1 -not -name '_meta.json' -print0 |
-    while IFS= read -r -d '' item; do
-      cp -R "$item" "$dest_dir/$slug/"
-    done
+  # _meta.json carries the published version; it is not part of the skill
+  local release=""
+  if [[ -f "$src_dir/_meta.json" ]]; then
+    release=$(json_first_string version "$(cat "$src_dir/_meta.json")")
+    rm -f "$src_dir/_meta.json"
+  fi
 
-  log "Installed skill from ClawHub: $slug → $dest_dir/$slug"
+  mkdir -p "$dest_dir"
+  place_skill "$src_dir" "$target" "$force" "" "$slug" || return 0
+  write_marker "$target" clawhub "${owner:+$owner/}$slug" "$slug" "" "" "" "$release" "$_UPS_PLACED_FILES"
+
+  if [[ "$_UPS_PLACE_MODE" == updated ]]; then
+    log "Updated skill from ClawHub: $slug${release:+ ($release)} → $target"
+  else
+    log "Installed skill from ClawHub: $slug${release:+ ($release)} → $target"
+  fi
 }
 
 resolve_tessl_ref() {
@@ -1120,6 +1453,478 @@ cmd_search() {
   echo "  From Tessl:    ${PROGRAM_NAME} <owner/repo> --skill <name>"
 }
 
+# --- GitHub source download ---
+
+use_api_download() {
+  # The REST path is used when unzip is missing, or when jq is available but
+  # git, gh or tar is not (e.g. the SLICC kernel).
+  ! command -v unzip >/dev/null 2>&1 || {
+    command -v jq >/dev/null 2>&1 && {
+      ! command -v git >/dev/null 2>&1 || ! command -v gh >/dev/null 2>&1 || ! command -v tar >/dev/null 2>&1
+    }
+  }
+}
+
+try_zip_download() {
+  # $1: ref, $2: work dir. Unpacks into $_UPS_SRC_ROOT and records the commit
+  # GitHub stores as the archive comment in _UPS_SRC_SHA.
+  local dl_ref="$1" work="$2" zip_url
+  local zip_file="$work/repo.zip"
+  # Try refs/heads/ first, then refs/tags/, then raw ref (for commits)
+  local -a url_patterns=(
+    "https://codeload.github.com/${_UPS_SRC_REPO}/zip/refs/heads/${dl_ref}"
+    "https://codeload.github.com/${_UPS_SRC_REPO}/zip/refs/tags/${dl_ref}"
+    "https://codeload.github.com/${_UPS_SRC_REPO}/zip/${dl_ref}"
+  )
+
+  for zip_url in "${url_patterns[@]}"; do
+    log "Downloading ZIP: $zip_url"
+    github_curl -o "$zip_file" "$zip_url"
+
+    # Check for HTTP errors
+    if [[ "$_GITHUB_CURL_STATUS" =~ ^2 ]]; then
+      # Success - proceed to unzip
+      break
+    elif [[ "$_GITHUB_CURL_STATUS" == "404" ]]; then
+      rm -f "$zip_file"
+      continue  # try next URL pattern
+    elif [[ "$_GITHUB_CURL_STATUS" == "429" || "$_GITHUB_CURL_STATUS" == "403" || "$_GITHUB_CURL_STATUS" == "401" ]]; then
+      # Read error body before removing
+      local err_body=""
+      if [[ -f "$zip_file" ]]; then
+        err_body=$(cat "$zip_file")
+      fi
+      rm -f "$zip_file"
+      handle_github_error "$_GITHUB_CURL_STATUS" "$err_body"
+    else
+      rm -f "$zip_file"
+      continue
+    fi
+  done
+
+  # Check if we got a successful download
+  if [[ ! -f "$zip_file" ]] || [[ ! "$_GITHUB_CURL_STATUS" =~ ^2 ]]; then
+    return 1
+  fi
+
+  # Unzip and strip top-level directory prefix
+  if command -v unzip >/dev/null 2>&1; then
+    # Zip-slip protection: check entries before extracting
+    local entries
+    entries=$(unzip -l "$zip_file" 2>/dev/null | awk 'NR>3 && /^[ ]*[0-9]/ {print $NF}') || return 1
+    if printf '%s\n' "$entries" | grep -qE '(^|/)\.\.(/|$)'; then
+      log "Warning: ZIP archive contains path traversal entries, skipping"
+      rm -f "$zip_file"
+      return 1
+    fi
+    local comment
+    comment=$(unzip -z "$zip_file" 2>/dev/null | tail -n 1) || comment=""
+    if [[ "$comment" =~ ^[0-9a-f]{40}$ ]]; then
+      _UPS_SRC_SHA="$comment"
+    fi
+    unzip -q "$zip_file" -d "$work/unzipped" 2>/dev/null || return 1
+  else
+    rm -f "$zip_file"
+    if command -v gh >/dev/null 2>&1; then
+      return 1
+    fi
+    die "unzip is required for ZIP-based downloads and gh is not installed for fallback cloning"
+  fi
+
+  # GitHub ZIPs have a single top-level dir: {repo}-{branch}/
+  local top_dir
+  top_dir=$(find "$work/unzipped" -mindepth 1 -maxdepth 1 -type d | head -n1)
+  if [[ -z "$top_dir" ]]; then
+    return 1
+  fi
+  mv "$top_dir" "$_UPS_SRC_ROOT"
+  rm -rf "$work/unzipped" "$zip_file"
+  return 0
+}
+
+resolve_default_branch() {
+  # Use GitHub API to resolve the default branch
+  github_curl "https://api.github.com/repos/${_UPS_SRC_REPO}"
+  if [[ "$_GITHUB_CURL_STATUS" =~ ^2 ]]; then
+    local default_branch
+    default_branch=$(printf '%s' "$_GITHUB_CURL_BODY" | grep -o '"default_branch": *"[^"]*"' | head -1 | sed 's/.*: *"//;s/"$//')
+    if [[ -n "$default_branch" ]]; then
+      printf '%s' "$default_branch"
+      return 0
+    fi
+  fi
+  return 1
+}
+
+fetch_github_source() {
+  # Download a repository into "$4/src".
+  # $1: owner/repo, $2: ref (optional), $3: sub path (optional), $4: work dir
+  # Sets _UPS_SRC_REPO, _UPS_SRC_ROOT and _UPS_SRC_SHA (the resolved commit,
+  # empty only when it cannot be determined).
+  _UPS_SRC_REPO="$1"
+  local branch="$2" sub_path="$3" work="$4" zip_ok=""
+  _UPS_SRC_ROOT="$work/src"
+  _UPS_SRC_SHA=""
+  _UPS_API_TREE=""
+  mkdir -p "$work"
+
+  if use_api_download; then
+    download_api_repository "$_UPS_SRC_REPO" "$branch" "$_UPS_SRC_ROOT" "$sub_path"
+    _UPS_SRC_SHA="$_UPS_API_SHA"
+    zip_ok=1
+  elif [[ -n "$branch" ]]; then
+    log "Downloading $_UPS_SRC_REPO (ref: $branch) as ZIP ..."
+    if try_zip_download "$branch" "$work"; then
+      zip_ok=1
+    fi
+  else
+    log "Downloading $_UPS_SRC_REPO as ZIP ..."
+    # Try to resolve default branch via API first
+    local resolved_branch
+    if resolved_branch=$(resolve_default_branch); then
+      log "Resolved default branch: $resolved_branch"
+      if try_zip_download "$resolved_branch" "$work"; then
+        zip_ok=1
+      fi
+    fi
+    # Fall back to trying common branch names
+    if [[ -z "$zip_ok" ]]; then
+      if try_zip_download "main" "$work"; then
+        zip_ok=1
+      elif try_zip_download "master" "$work"; then
+        zip_ok=1
+      fi
+    fi
+  fi
+
+  # Fall back to gh repo clone if ZIP download failed
+  if [[ -z "$zip_ok" ]]; then
+    log "ZIP download failed, falling back to gh repo clone ..."
+    require_cmd gh
+    require_cmd git
+    if [[ -n "$branch" ]]; then
+      log "Cloning $_UPS_SRC_REPO (branch: $branch) ..."
+      gh repo clone "$_UPS_SRC_REPO" "$_UPS_SRC_ROOT" -- -b "$branch" --depth 1 >/dev/null
+    else
+      log "Cloning $_UPS_SRC_REPO ..."
+      gh repo clone "$_UPS_SRC_REPO" "$_UPS_SRC_ROOT" -- --depth 1 >/dev/null
+    fi
+    _UPS_SRC_SHA=$(git -C "$_UPS_SRC_ROOT" rev-parse HEAD 2>/dev/null) || _UPS_SRC_SHA=""
+  fi
+
+  # Archives without a commit comment: ask the API (best effort).
+  if [[ -z "$_UPS_SRC_SHA" ]]; then
+    if [[ "$branch" =~ ^[0-9a-f]{40}$ ]]; then
+      _UPS_SRC_SHA="$branch"
+    else
+      github_curl "https://api.github.com/repos/${_UPS_SRC_REPO}/commits/$(urlencode "${branch:-HEAD}")"
+      if [[ "$_GITHUB_CURL_STATUS" =~ ^2 ]]; then
+        _UPS_SRC_SHA=$(json_first_string sha "$_GITHUB_CURL_BODY")
+      fi
+    fi
+  fi
+}
+
+urlencode() {
+  local LC_ALL=C s="$1" out="" c i hex
+  for ((i = 0; i < ${#s}; i++)); do
+    c="${s:i:1}"
+    case "$c" in
+      [a-zA-Z0-9._~-]) out+="$c" ;;
+      *) printf -v hex '%%%02X' "'$c"; out+="$hex" ;;
+    esac
+  done
+  printf '%s' "$out"
+}
+
+json_first_string() {
+  # $1: key, $2: JSON text. Prints the first string value for that key.
+  printf '%s' "$2" | grep -o "\"$1\": *\"[^\"]*\"" | head -n 1 | sed 's/.*: *"//; s/"$//' || true
+}
+
+# --- outdated / update ---
+
+github_path_commit() {
+  # Latest commit touching a path, as reachable from a ref or commit.
+  # $1: owner/repo, $2: ref or sha (empty: default branch), $3: path
+  # Sets _UPS_PATH_COMMIT; returns 1 on HTTP errors (see _GITHUB_CURL_STATUS).
+  local url="https://api.github.com/repos/$1/commits?per_page=1"
+  [[ -z "$2" ]] || url+="&sha=$(urlencode "$2")"
+  [[ -z "$3" ]] || url+="&path=$(urlencode "$3")"
+  _UPS_PATH_COMMIT=""
+  github_curl "$url"
+  [[ "$_GITHUB_CURL_STATUS" =~ ^2 ]] || return 1
+  if command -v jq >/dev/null 2>&1; then
+    _UPS_PATH_COMMIT=$(printf '%s' "$_GITHUB_CURL_BODY" | jq -r '.[0].sha // empty' 2>/dev/null) || _UPS_PATH_COMMIT=""
+  else
+    _UPS_PATH_COMMIT=$(json_first_string sha "$_GITHUB_CURL_BODY")
+  fi
+  [[ "$_UPS_PATH_COMMIT" =~ ^[0-9a-f]{40}$ ]] || _UPS_PATH_COMMIT=""
+  [[ -n "$_UPS_PATH_COMMIT" ]] || { _GITHUB_CURL_STATUS=404; return 1; }
+}
+
+skill_status() {
+  # $1: skill dir with a marker. Prints
+  # "current|outdated<TAB>installed<TAB>latest<TAB>source".
+  # A GitHub skill is outdated when the latest commit touching its path on
+  # the recorded ref (default branch if none) differs from the latest commit
+  # touching that path as of the installed sha. Commits elsewhere in the repo
+  # do not make a skill outdated.
+  local m="$1/$MARKER_FILE" kind source ref path sha release latest state
+  kind=$(marker_get "$m" kind)
+  source=$(marker_get "$m" source)
+  case "$kind" in
+    github)
+      ref=$(marker_get "$m" ref)
+      path=$(marker_get "$m" path)
+      sha=$(marker_get "$m" sha)
+      github_path_commit "$source" "$ref" "$path" || handle_github_error "$_GITHUB_CURL_STATUS" "$_GITHUB_CURL_BODY"
+      latest="$_UPS_PATH_COMMIT"
+      if [[ -z "$sha" ]]; then
+        state=outdated
+      elif [[ "$sha" == "$latest" ]]; then
+        state=current
+      elif github_path_commit "$source" "$sha" "$path"; then
+        if [[ "$_UPS_PATH_COMMIT" == "$latest" ]]; then state=current; else state=outdated; fi
+      elif [[ "$_GITHUB_CURL_STATUS" == 404 || "$_GITHUB_CURL_STATUS" == 422 ]]; then
+        state=outdated  # installed commit no longer exists upstream
+      else
+        handle_github_error "$_GITHUB_CURL_STATUS" "$_GITHUB_CURL_BODY"
+      fi
+      printf '%s\t%s\t%s\t%s\n' "$state" "${sha:0:7}" "${latest:0:7}" "$source"
+      ;;
+    clawhub)
+      release=$(marker_get "$m" release)
+      local owner="" slug="$source" body status tmp
+      if [[ "$source" == */* ]]; then owner="${source%%/*}"; slug="${source##*/}"; fi
+      tmp=$(mktemp)
+      status=$(curl -sS -L -w '%{http_code}' -o "$tmp" -H 'Accept: application/json' \
+        "${CLAWHUB_API}/skills/${slug}${owner:+?ownerHandle=$owner}" 2>/dev/null) || status=000
+      body=$(cat "$tmp")
+      rm -f "$tmp"
+      [[ "$status" =~ ^2 ]] || die "ClawHub lookup failed (HTTP $status) for: $source"
+      if command -v jq >/dev/null 2>&1; then
+        latest=$(printf '%s' "$body" | jq -r '.latestVersion.version // empty' 2>/dev/null) || latest=""
+      else
+        latest=$(printf '%s' "$body" | grep -o '"latestVersion": *{ *"version": *"[^"]*"' | sed 's/.*"version": *"//; s/"$//' || true)
+      fi
+      [[ -n "$latest" ]] || die "ClawHub returned no version for: $source"
+      if [[ "$release" == "$latest" ]]; then state=current; else state=outdated; fi
+      printf '%s\t%s\t%s\t%s\n' "$state" "${release:-?}" "$latest" "clawhub:$source"
+      ;;
+    *) die "Unsupported marker kind '$kind' in $m" ;;
+  esac
+}
+
+marked_skill_dirs() {
+  # $1: custom dir (optional). Prints skill dirs that carry a valid marker.
+  local entry dir d
+  while IFS= read -r entry; do
+    dir="${entry%%|*}"
+    [[ -d "$dir" ]] || continue
+    for d in "$dir"/*/; do
+      [[ -d "$d" ]] || continue
+      d="${d%/}"
+      if marker_valid "$d/$MARKER_FILE"; then printf '%s\n' "$d"; fi
+    done
+  done < <(skill_dir_entries "${1:-}")
+}
+
+marker_files_present() {
+  # True when every file the marker lists is still on disk.
+  local rel any=""
+  while IFS= read -r rel; do
+    any=1
+    [[ -e "$1/$rel" || -L "$1/$rel" ]] || return 1
+  done < <(marker_files "$1/$MARKER_FILE")
+  [[ -n "$any" ]]
+}
+
+display_dir() {
+  if [[ "$1" == "$HOME/"* ]]; then
+    # shellcheck disable=SC2088
+    printf '~/%s' "${1#"$HOME"/}"
+  else
+    printf '%s' "$1"
+  fi
+}
+
+cmd_outdated() {
+  parse_dest_arg "" "$@"
+  [[ ${#_UPS_ARGS[@]} -eq 0 ]] || die "Usage: ${PROGRAM_NAME} outdated [--dest <path>]"
+  require_cmd curl
+
+  local -a rows=()
+  local tracked=0 failed=0 dir line
+  while IFS= read -r dir; do
+    tracked=$((tracked + 1))
+    if line=$(skill_status "$dir"); then
+      if [[ "$line" == outdated* ]]; then
+        rows+=("$(basename "$dir")"$'\t'"${line#*$'\t'}"$'\t'"$(display_dir "$dir")")
+      fi
+    else
+      failed=$((failed + 1))
+      printf 'Warning: could not check %s\n' "$(display_dir "$dir")" >&2
+    fi
+  done < <(marked_skill_dirs "$_UPS_ARG_DEST")
+
+  if [[ "$tracked" -eq 0 ]]; then
+    echo "No installed skills with a $MARKER_FILE marker found."
+    return 0
+  fi
+  if [[ ${#rows[@]} -eq 0 ]]; then
+    if [[ "$failed" -eq 0 ]]; then
+      echo "All $tracked tracked skill(s) are up to date."
+      return 0
+    fi
+    return 1
+  fi
+
+  local -a c1=() c2=() c3=() c4=() c5=()
+  local row w1=4 w2=9 w3=6 w4=6 a b c d e i
+  for row in "${rows[@]}"; do
+    IFS=$'\t' read -r a b c d e <<<"$row"
+    c1+=("$a"); c2+=("${b:-?}"); c3+=("$c"); c4+=("$d"); c5+=("$e")
+    [[ ${#a} -le $w1 ]] || w1=${#a}
+    [[ ${#b} -le $w2 ]] || w2=${#b}
+    [[ ${#c} -le $w3 ]] || w3=${#c}
+    [[ ${#d} -le $w4 ]] || w4=${#d}
+  done
+  printf "  %-${w1}s  %-${w2}s  %-${w3}s  %-${w4}s  %s\n" NAME INSTALLED LATEST SOURCE PATH
+  for ((i = 0; i < ${#c1[@]}; i++)); do
+    printf "  %-${w1}s  %-${w2}s  %-${w3}s  %-${w4}s  %s\n" "${c1[$i]}" "${c2[$i]}" "${c3[$i]}" "${c4[$i]}" "${c5[$i]}"
+  done
+  echo ""
+  echo "${#rows[@]} of $tracked tracked skill(s) can be updated: ${PROGRAM_NAME} update --all${_UPS_ARG_DEST:+ --dest $_UPS_ARG_DEST}"
+  [[ "$failed" -eq 0 ]]
+}
+
+update_one() {
+  # $1: skill dir with a marker, $2: force, $3: index (unique work dir)
+  # Exit status: 0 updated, 10 already current, other: failed.
+  local dir="$1" force="$2" idx="$3"
+  local m="$dir/$MARKER_FILE" name dest kind source ref path sha status
+  name=$(basename "$dir")
+  dest=$(dirname "$dir")
+  kind=$(marker_get "$m" kind)
+  source=$(marker_get "$m" source)
+  ref=$(marker_get "$m" ref)
+  path=$(marker_get "$m" path)
+  sha=$(marker_get "$m" sha)
+
+  case "$kind" in
+    github|clawhub) ;;
+    *) die "$name: unsupported marker kind '$kind'" ;;
+  esac
+
+  if [[ -z "$force" ]]; then
+    status=$(skill_status "$dir") || exit 1
+    if [[ "$status" == current* ]] && marker_files_present "$dir"; then
+      log "$name is up to date ($(marker_label "$dir"))"
+      return 10
+    fi
+  fi
+
+  if [[ "$kind" == clawhub ]]; then
+    local owner="" slug="$source"
+    if [[ "$source" == */* ]]; then owner="${source%%/*}"; slug="${source##*/}"; fi
+    [[ "$slug" == "$name" ]] || die "$name: marker source $source does not match the folder name"
+    install_from_clawhub "$slug" "$dest" "" "$owner"
+    return 0
+  fi
+
+  [[ "$source" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || die "$name: unusable source '$source' in $m"
+  if [[ "$path" == /* || "$path" =~ (^|/)\.\.(/|$) ]]; then
+    die "$name: unsafe path '$path' in $m"
+  fi
+  log "Updating $name from $source${path:+ ($path)}${ref:+, ref $ref}${sha:+, installed ${sha:0:7}}"
+
+  # ZIP/clone downloads hold the whole repository: share them between skills
+  # from the same repo and ref. REST downloads are per skill path.
+  local work="$_UPS_TMPDIR/fetch-$idx"
+  if ! use_api_download; then
+    local key
+    key=$(printf '%s' "$source@$ref" | tr -c 'A-Za-z0-9' '_')
+    work="$_UPS_TMPDIR/cache-$key"
+  fi
+  if [[ -f "$work/sha" && -d "$work/src" ]]; then
+    _UPS_SRC_REPO="$source" _UPS_SRC_ROOT="$work/src" _UPS_API_TREE=""
+    _UPS_SRC_SHA=$(cat "$work/sha")
+  else
+    fetch_github_source "$source" "$ref" "$path" "$work"
+    printf '%s' "$_UPS_SRC_SHA" >"$work/sha"
+  fi
+
+  local skill_dir="$_UPS_SRC_ROOT${path:+/$path}"
+  [[ -f "$skill_dir/SKILL.md" ]] || die "$name: no SKILL.md at $source${path:+/$path}; the skill may have moved or been removed upstream"
+  _UPS_SRC_REF="$ref"
+  copy_skill "$skill_dir/SKILL.md" "$dest" "" "" "$name" || die "$name: update failed"
+}
+
+cmd_update() {
+  parse_dest_arg "--all --force" "$@"
+  local all="" force=""
+  [[ "$_UPS_ARG_FLAGS" != *" --all "* ]] || all=1
+  [[ "$_UPS_ARG_FLAGS" != *" --force "* ]] || force=1
+  if [[ -z "$all" && ${#_UPS_ARGS[@]} -eq 0 ]]; then
+    die "Usage: ${PROGRAM_NAME} update <name>... | --all [--dest <path>] [--force]"
+  fi
+  if [[ -n "$all" && ${#_UPS_ARGS[@]} -gt 0 ]]; then
+    die "--all and skill names are mutually exclusive"
+  fi
+  require_cmd curl
+  require_cmd awk
+  require_cmd sed
+  _UPS_TMPDIR=$(mktemp -d)
+
+  local -a targets=()
+  local failed=0 dir name entry found
+  if [[ -n "$all" ]]; then
+    while IFS= read -r dir; do targets+=("$dir"); done < <(marked_skill_dirs "$_UPS_ARG_DEST")
+    if [[ ${#targets[@]} -eq 0 ]]; then
+      echo "No installed skills with a $MARKER_FILE marker found."
+      return 0
+    fi
+  else
+    for name in "${_UPS_ARGS[@]}"; do
+      found=""
+      while IFS= read -r entry; do
+        dir="${entry%%|*}/$name"
+        [[ -d "$dir" ]] || continue
+        found=1
+        if marker_valid "$dir/$MARKER_FILE"; then
+          targets+=("$dir")
+        else
+          printf 'Error: %s has no %s marker, so upskill does not know where it came from. Reinstall it once with: %s <owner/repo> --skill <name> --force\n' \
+            "$(display_dir "$dir")" "$MARKER_FILE" "$PROGRAM_NAME" >&2
+          failed=$((failed + 1))
+        fi
+      done < <(skill_dir_entries "$_UPS_ARG_DEST")
+      if [[ -z "$found" ]]; then
+        printf 'Error: skill "%s" is not installed%s\n' "$name" "${_UPS_ARG_DEST:+ in $_UPS_ARG_DEST}" >&2
+        failed=$((failed + 1))
+      fi
+    done
+  fi
+
+  local updated=0 current=0 idx=0 rc
+  for dir in "${targets[@]}"; do
+    idx=$((idx + 1))
+    set +e
+    (set -e; update_one "$dir" "$force" "$idx")
+    rc=$?
+    set -e
+    case "$rc" in
+      0) updated=$((updated + 1)) ;;
+      10) current=$((current + 1)) ;;
+      *) failed=$((failed + 1)) ;;
+    esac
+  done
+
+  log "Updated $updated, up to date $current, failed $failed."
+  [[ "$failed" -eq 0 ]]
+}
+
 main() {
   # Handle subcommands before flag parsing
   case "${1:-}" in
@@ -1143,6 +1948,16 @@ main() {
       cmd_search "$@"
       return 0
       ;;
+    outdated)
+      shift
+      cmd_outdated "$@"
+      return
+      ;;
+    update)
+      shift
+      cmd_update "$@"
+      return
+      ;;
   esac
 
   local repo=""
@@ -1157,6 +1972,7 @@ main() {
   local force=""
   local source_type="github"  # github | clawhub | tessl
   local clawhub_slug=""
+  local clawhub_owner=""
   local tessl_name=""
   local -a selected_skills=()
 
@@ -1180,6 +1996,8 @@ main() {
           # ClawHub full URL: https://clawhub.ai/<user>/<slug>
           source_type="clawhub"
           clawhub_slug="${1##*/}"
+          local ch_path="${1#https://clawhub.ai/}"
+          if [[ "$ch_path" == */* ]]; then clawhub_owner="${ch_path%%/*}"; fi
           repo="$1"
         elif [[ "$1" == clawhub:* ]]; then
           # ClawHub shorthand: clawhub:<slug> or clawhub:<user>/<slug>
@@ -1187,6 +2005,7 @@ main() {
           local ch_ref="${1#clawhub:}"
           # Use the last path segment as the slug
           clawhub_slug="${ch_ref##*/}"
+          if [[ "$ch_ref" == */* ]]; then clawhub_owner="${ch_ref%%/*}"; fi
           repo="$1"
         elif [[ "$1" == tessl:* ]]; then
           # Tessl shorthand: tessl:<name>
@@ -1247,7 +2066,7 @@ main() {
       ch_dest_dir=".agents/skills"
     fi
     mkdir -p "$ch_dest_dir"
-    install_from_clawhub "$clawhub_slug" "$ch_dest_dir" "$force"
+    install_from_clawhub "$clawhub_slug" "$ch_dest_dir" "$force" "$clawhub_owner"
     log "Done."
     return 0
   fi
@@ -1267,144 +2086,9 @@ main() {
   _UPS_TMPDIR=$(mktemp -d)
   log "Created temp dir: $_UPS_TMPDIR"
 
-  local clone_dir
-  clone_dir="$_UPS_TMPDIR/src"
-
-  # Try ZIP-based download first (no gh/git required)
-  local zip_ok=""
-  local owner_repo="$repo"
-
-  _try_zip_download() {
-    local dl_ref="$1"
-    # Try refs/heads/ first, then refs/tags/, then raw ref (for commits)
-    local -a url_patterns=(
-      "https://codeload.github.com/${owner_repo}/zip/refs/heads/${dl_ref}"
-      "https://codeload.github.com/${owner_repo}/zip/refs/tags/${dl_ref}"
-      "https://codeload.github.com/${owner_repo}/zip/${dl_ref}"
-    )
-
-    for zip_url in "${url_patterns[@]}"; do
-      local zip_file="$_UPS_TMPDIR/repo.zip"
-
-      log "Downloading ZIP: $zip_url"
-      github_curl -o "$zip_file" "$zip_url"
-
-      # Check for HTTP errors
-      if [[ "$_GITHUB_CURL_STATUS" =~ ^2 ]]; then
-        # Success - proceed to unzip
-        break
-      elif [[ "$_GITHUB_CURL_STATUS" == "404" ]]; then
-        rm -f "$zip_file"
-        continue  # try next URL pattern
-      elif [[ "$_GITHUB_CURL_STATUS" == "429" || "$_GITHUB_CURL_STATUS" == "403" || "$_GITHUB_CURL_STATUS" == "401" ]]; then
-        # Read error body before removing
-        local err_body=""
-        if [[ -f "$zip_file" ]]; then
-          err_body=$(cat "$zip_file")
-        fi
-        rm -f "$zip_file"
-        handle_github_error "$_GITHUB_CURL_STATUS" "$err_body"
-      else
-        rm -f "$zip_file"
-        continue
-      fi
-    done
-
-    # Check if we got a successful download
-    if [[ ! -f "$zip_file" ]] || [[ ! "$_GITHUB_CURL_STATUS" =~ ^2 ]]; then
-      return 1
-    fi
-
-    # Unzip and strip top-level directory prefix
-    if command -v unzip >/dev/null 2>&1; then
-      # Zip-slip protection: check entries before extracting
-      local entries
-      entries=$(unzip -l "$zip_file" 2>/dev/null | awk 'NR>3 && /^[ ]*[0-9]/ {print $NF}') || return 1
-      if printf '%s\n' "$entries" | grep -qE '(^|/)\.\.(/|$)'; then
-        log "Warning: ZIP archive contains path traversal entries, skipping"
-        rm -f "$zip_file"
-        return 1
-      fi
-      unzip -q "$zip_file" -d "$_UPS_TMPDIR/unzipped" 2>/dev/null || return 1
-    else
-      rm -f "$zip_file"
-      if command -v gh >/dev/null 2>&1; then
-        return 1
-      fi
-      die "unzip is required for ZIP-based downloads and gh is not installed for fallback cloning"
-    fi
-
-    # GitHub ZIPs have a single top-level dir: {repo}-{branch}/
-    local top_dir
-    top_dir=$(find "$_UPS_TMPDIR/unzipped" -mindepth 1 -maxdepth 1 -type d | head -n1)
-    if [[ -z "$top_dir" ]]; then
-      return 1
-    fi
-    mv "$top_dir" "$clone_dir"
-    rm -rf "$_UPS_TMPDIR/unzipped" "$zip_file"
-    return 0
-  }
-
-  _resolve_default_branch() {
-    # Use GitHub API to resolve the default branch
-    local api_url="https://api.github.com/repos/${owner_repo}"
-    github_curl "$api_url"
-    if [[ "$_GITHUB_CURL_STATUS" =~ ^2 ]]; then
-      local default_branch
-      default_branch=$(printf '%s' "$_GITHUB_CURL_BODY" | grep -o '"default_branch":"[^"]*"' | head -1 | sed 's/"default_branch":"//;s/"$//')
-      if [[ -n "$default_branch" ]]; then
-        printf '%s' "$default_branch"
-        return 0
-      fi
-    fi
-    return 1
-  }
-
-  if ! command -v unzip >/dev/null 2>&1 || {
-    command -v jq >/dev/null 2>&1 && {
-      ! command -v git >/dev/null 2>&1 || ! command -v gh >/dev/null 2>&1 || ! command -v tar >/dev/null 2>&1
-    }
-  }; then
-    download_api_repository "$repo" "$branch" "$clone_dir" "$sub_path"
-    zip_ok=1
-  elif [[ -n "$branch" ]]; then
-    log "Downloading $repo (ref: $branch) as ZIP ..."
-    if _try_zip_download "$branch"; then
-      zip_ok=1
-    fi
-  else
-    log "Downloading $repo as ZIP ..."
-    # Try to resolve default branch via API first
-    local resolved_branch
-    if resolved_branch=$(_resolve_default_branch); then
-      log "Resolved default branch: $resolved_branch"
-      if _try_zip_download "$resolved_branch"; then
-        zip_ok=1
-      fi
-    fi
-    # Fall back to trying common branch names
-    if [[ -z "$zip_ok" ]]; then
-      if _try_zip_download "main"; then
-        zip_ok=1
-      elif _try_zip_download "master"; then
-        zip_ok=1
-      fi
-    fi
-  fi
-
-  # Fall back to gh repo clone if ZIP download failed
-  if [[ -z "$zip_ok" ]]; then
-    log "ZIP download failed, falling back to gh repo clone ..."
-    require_cmd gh
-    require_cmd git
-    if [[ -n "$branch" ]]; then
-      log "Cloning $repo (branch: $branch) ..."
-      gh repo clone "$repo" "$clone_dir" -- -b "$branch" --depth 1 >/dev/null
-    else
-      log "Cloning $repo ..."
-      gh repo clone "$repo" "$clone_dir" -- --depth 1 >/dev/null
-    fi
-  fi
+  _UPS_SRC_REF="$branch"
+  fetch_github_source "$repo" "$branch" "$sub_path" "$_UPS_TMPDIR/fetch"
+  local clone_dir="$_UPS_SRC_ROOT"
 
   # Determine search root (optionally restricted to a subfolder)
   local search_dir="$clone_dir"

@@ -8,6 +8,7 @@ require_cmd() { command -v "$1" >/dev/null 2>&1; }
 
 bash "$ROOT_DIR/tests/test-portable.sh"
 bash "$ROOT_DIR/tests/test-frontmatter.sh"
+bash "$ROOT_DIR/tests/test-update.sh"
 
 if ! require_cmd curl; then
   echo "SKIP: curl not installed" >&2
@@ -130,12 +131,23 @@ count_bp=$(find b-precedence-skills -name 'SKILL.md' -type f | wc -l | tr -d ' '
 [[ "$count_bp" -gt 0 ]] || { echo "FAIL: No skills installed with -b precedence test"; exit 1; }
 echo "  -b flag precedence works correctly"
 
-# --- Test 14: --force flag ---
-echo "Test 14: --force flag ..."
-# Skills were already installed above; re-installing without --force should skip
+# --- Test 14: reinstall behaviour (.upskill marker, --force) ---
+echo "Test 14: reinstall with and without marker, --force ..."
+# Installed skills carry a .upskill marker with the resolved commit
+marker=$(find .agents/skills -name .upskill -type f | head -n 1)
+[[ -n "$marker" ]] || { echo "FAIL: no .upskill marker written"; exit 1; }
+grep -Eq '"sha": "[0-9a-f]{40}"' "$marker" || { echo "FAIL: marker lacks resolved sha"; cat "$marker"; exit 1; }
+# Reinstalling over a marked skill updates it in place and keeps state files
+marked_dir=$(dirname "$marker")
+echo state > "$marked_dir/state-file.json"
+update_out=$("$ROOT_DIR/upskill" adobe/helix-website -b main --all 2>&1)
+echo "$update_out" | grep -q "Updating skill in place" || { echo "FAIL: expected in-place update"; echo "$update_out"; exit 1; }
+test -f "$marked_dir/state-file.json" || { echo "FAIL: in-place update removed a state file"; exit 1; }
+# Without a marker, reinstalling skips the skill
+find .agents/skills -name .upskill -type f -delete
 skip_out=$("$ROOT_DIR/upskill" adobe/helix-website -b main --all 2>&1 || true)
 if echo "$skip_out" | grep -q "already exists"; then
-  echo "  Correctly skipped existing skill without --force"
+  echo "  Correctly skipped existing unmarked skill without --force"
 else
   echo "FAIL: Expected skip warning for existing skill without --force"
   exit 1
@@ -152,6 +164,7 @@ fi
 # Verify skills still present after --force
 count_force=$(find .agents/skills -name 'SKILL.md' -type f | wc -l | tr -d ' ')
 [[ "$count_force" -gt 0 ]] || { echo "FAIL: No skills after --force reinstall"; exit 1; }
+"$ROOT_DIR/upskill" outdated | grep -Eq 'up to date|can be updated' || { echo "FAIL: outdated"; exit 1; }
 
 # --- Test 15: upskill list subcommand ---
 echo "Test 15: upskill list ..."

@@ -40,26 +40,86 @@ upskill anthropics/skills --skill pdf --skill xlsx
 upskill anthropics/skills --all
 ```
 
-**Overwrite existing skills:**
+**Replace existing skills that upskill did not install:**
 ```
 upskill anthropics/skills --all --force
 ```
+
+Reinstalling a skill that upskill installed updates it in place, with or without `--force` (see [Updating skills](#updating-skills)).
 
 ### Subcommands
 
 | Subcommand | Description |
 |------------|-------------|
-| `list` | List locally installed/discovered skills |
-| `info <name>` | Show details about a locally installed skill |
+| `list [--dest D]` | List local skills, with the source and short commit they were installed from |
+| `info <name> [--dest D]` | Show details about a local skill, including its source, path and commit |
 | `read <name>` | Print the SKILL.md content of a locally installed skill |
+| `outdated [--dest D]` | List installed skills whose source has newer commits for their path |
+| `update <name>... \| --all [--dest D] [--force]` | Update installed skills in place from their recorded source |
 | `search <query>` | Search ClawHub and Tessl skill registries |
 
 ```
 upskill list                        # Show local skills
 upskill info pdf                    # Show skill details
 upskill read pdf                    # Print SKILL.md content
+upskill outdated                    # Which installed skills are behind
+upskill update --all                # Update them in place
 upskill search "pdf converter"      # Search registries
 ```
+
+Without `--dest`, `list`, `outdated` and `update` look in the same folders as `list`: `.agents/skills`, `.skills`, `.claude/skills`, `.pi/skills`, `~/.pi/agent/skills`, `~/.agents/skills`, `~/.skills` and `~/.claude/skills`. With `--dest`, they look only in that folder.
+
+### Updating skills
+
+Every install writes a `.upskill` marker into the skill folder. It uses the format SLICC 6's built-in upskill wrote, so markers from SLICC 6 work with this tool and the other way round:
+
+```json
+{
+  "kind": "github",
+  "source": "ai-ecoverse/skills",
+  "skill": "slack",
+  "path": "skills/slack",
+  "sha": "1fd7a319946c495c6ed95c79a43143fabf0fe0e4",
+  "version": 1,
+  "installed": "2026-10-27T17:43:51.000Z",
+  "files": ["SKILL.md", "references/app-manifest.md", "scripts/slack-support.jsh", "..."]
+}
+```
+
+- `sha` is the commit the files came from. upskill reads it from the REST API, from the commit GitHub stores as the ZIP archive comment, or from the clone. It is never a branch name.
+- `ref` is recorded only when you pass `--branch` or `owner/repo@ref`. Updates then follow that ref; without it they follow the default branch.
+- `files` lists every path upskill wrote, relative to the skill folder.
+- ClawHub installs record `"kind": "clawhub"`, `"source": "<owner>/<slug>"` and the published version as `"release"`.
+
+When you reinstall over a folder that has a marker, or run `upskill update`, the skill is updated in place:
+
+- New and changed files from upstream are written.
+- Files the old marker lists that upstream no longer has are removed.
+- Nothing else is touched. That includes files a skill keeps as state in its own folder (for example slack's `.last-post-*.json`, `.watch-*.json` and `emoji-cache.json`) and your own notes.
+- Dotfiles that already exist are never overwritten or removed, because they often hold credentials (for example `scripts/.config`). Upstream dotfiles are still written when they are missing.
+
+A folder without a marker keeps the old behaviour. It is skipped, or deleted and reinstalled with `--force`. To start tracking a skill like that, reinstall it once with `--force`.
+
+`upskill outdated` reports a GitHub skill when the newest commit that touches the skill's `path` differs from the newest commit that touched it at the installed `sha`. Commits elsewhere in the repository don't count. Each check uses one or two GitHub API calls. ClawHub skills are compared by published version.
+
+```
+$ upskill outdated --dest /usr/share/skills
+  NAME   INSTALLED  LATEST   SOURCE              PATH
+  slack  1fd7a31    556021b  ai-ecoverse/skills  /usr/share/skills/slack
+
+1 of 1 tracked skill(s) can be updated: upskill update --all --dest /usr/share/skills
+
+$ upskill update slack --dest /usr/share/skills
+Updating slack from ai-ecoverse/skills (skills/slack), installed 1fd7a31
+Updating skill in place: slack
+  removed scripts/slack-support.jsh (dropped upstream)
+Updated skill: slack (c97fec8)
+Updated 1, up to date 0, failed 0.
+```
+
+`LATEST` is the newest commit that touches the skill's path. After an update, the marker's `sha` is the repository commit the files were downloaded from, which can be newer.
+
+`update` skips skills that are already current and still have every file the marker lists. `--force` downloads them again anyway, which restores deleted files. `update` exits non-zero if any skill fails to update. The other skills are still updated.
 
 ### Install sources
 
@@ -125,7 +185,7 @@ This is useful for compatibility with tools that expect skills in different loca
 | `--list` | List available skills without installing |
 | `--skill <name>` | Install specific skill(s) (repeatable) |
 | `--all` | Install all discovered skills |
-| `--force` | Overwrite existing skill directories |
+| `--force` | Replace existing skill directories that have no `.upskill` marker |
 | `-i` | Add `.agents/skills/` to `.gitignore` |
 | `-q, --quiet` | Reduce output |
 
@@ -133,7 +193,7 @@ This is useful for compatibility with tools that expect skills in different loca
 
 1. With git, gh, tar and unzip available, downloads a ZIP archive and falls back to `gh repo clone` if needed.
 2. When any of those tools is missing and `jq` is available (or `unzip` is unavailable), uses `curl` and `jq` with GitHub's recursive git trees API to discover `**/SKILL.md`. Downloads manifests for discovery, then the selected skills' files individually through the contents API, pinned to the resolved commit. No archive extraction or git is needed. Desktop installations with `unzip` but no `jq` retain the ZIP path.
-3. Copies selected skill directories, including hidden files and executable modes, to the destination.
+3. Copies selected skill directories, including hidden files and executable modes, to the destination, and writes a `.upskill` marker with the source, path, resolved commit and installed files. If the destination already has a marker, upskill updates it in place instead.
 
 Authentication uses `GITHUB_TOKEN`, then `GH_TOKEN`, then `gh auth token` if available. This supports private repositories and higher API rate limits. Errors distinguish rate limits from permission failures. The REST path rejects truncated trees and unsafe paths instead of installing an incomplete or unsafe skill. Symbolic links with absolute targets or `..` components are rejected. ClawHub's ZIP downloads still require `unzip`; Tessl skills that resolve to GitHub can use the REST path.
 
@@ -175,8 +235,8 @@ Using `--dest-path` disables this auto-detection — skills are only installed t
 ## Development
 
 - Lint: `make lint` (shellcheck)
-- Test: `make test` (portable fixtures plus network integration tests)
-- Kernel: `bash tests/test-kernel.sh` (Node 24+, npm and network required). Runs actual WASM bash, coreutils, curl, jq, sed, gawk, grep and findutils through the Node kernel entry, with no Chrome harness. It serves the checkout's installer/scripts through the test transport so PR changes are exercised, then installs a public skill from the real GitHub API. CI supplies `GH_TOKEN` for API limits; a local shell can supply either token variable.
+- Test: `make test` (portable fixtures, offline marker/update fixtures in `tests/test-update.sh`, plus network integration tests). `UPSKILL=/path/to/upskill bash tests/test-update.sh` runs the update tests against another build.
+- Kernel: `bash tests/test-kernel.sh` (Node 24+, npm and network required). Runs actual WASM bash, coreutils, curl, jq, sed, gawk, grep and findutils through the Node kernel entry, with no Chrome harness. It serves the checkout's installer/scripts through the test transport so PR changes are exercised, then installs a public skill from the real GitHub API. It also installs `ai-ecoverse/skills`' slack skill at `1fd7a31` into `/usr/share/skills` with a SLICC 6-style marker and state files, then checks `outdated` and `update`. CI supplies `GH_TOKEN` for API limits; a local shell can supply either token variable.
 - CI runs lint, shell tests and the kernel test on pushes/PRs to `main`.
 
 The Node entry uses an in-memory filesystem and a transport without browser CORS constraints. For the final check in seven's actual OPFS/browser environment, run:

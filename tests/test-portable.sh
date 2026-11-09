@@ -5,7 +5,7 @@ ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 mkdir -p "$TMP/bin" "$TMP/fixtures" "$TMP/home"
-for cmd in uname bash cat chmod cp dirname basename find head awk sed jq mkdir mktemp rm grep wc tr mv ln cmp readlink; do
+for cmd in uname bash cat chmod cp dirname basename find head awk sed jq mkdir mktemp rm grep wc tr mv ln cmp readlink ls; do
   ln -s "$(command -v "$cmd")" "$TMP/bin/$cmd"
 done
 cat > "$TMP/fixtures/tree.json" <<'JSON'
@@ -80,6 +80,13 @@ test -L "$TMP/installed/demo/link"
 printf '\000\001\377' > "$TMP/expected.bin"
 cmp "$TMP/expected.bin" "$TMP/installed/demo/data.bin"
 [[ "$(readlink "$TMP/installed/demo/link")" == run.sh ]]
+grep -q '"sha": "commit-sha"' "$TMP/installed/demo/.upskill"
+grep -q '"path": "skills/demo"' "$TMP/installed/demo/.upskill"
+grep -q '"link"' "$TMP/installed/demo/.upskill"
+"$ROOT_DIR/upskill" list --dest "$TMP/installed" > "$TMP/marker-list.log"
+grep -q 'test/repo@commit-' "$TMP/marker-list.log"
+"$ROOT_DIR/upskill" info demo --dest "$TMP/installed" > "$TMP/marker-info.log"
+grep -q 'Installed from: github:test/repo' "$TMP/marker-info.log"
 grep -q '/commits/feature%2Fportable' "$FIXTURES/requests"
 if grep -q '/contents/other/' "$FIXTURES/requests"; then echo 'FAIL: downloaded unselected skill files'; exit 1; fi
 SLICC_PAGE_LOOPBACK=1 "$ROOT_DIR/upskill" test/repo@main --skill demo
@@ -158,5 +165,8 @@ UNZIP
 chmod +x "$TMP/bin/unzip"
 upskill test/repo@main --skill demo --dest "$TMP/zip-without-jq"
 test -f "$TMP/zip-without-jq/demo/SKILL.md"
+grep -q '"sha": "commit-sha"' "$TMP/zip-without-jq/demo/.upskill"
+"$ROOT_DIR/upskill" list --dest "$TMP/zip-without-jq" > "$TMP/zip-list.log"
+grep -q 'test/repo@commit-' "$TMP/zip-list.log"
 grep -q 'codeload.github.com/test/repo/' "$FIXTURES/requests"
 echo 'PORTABLE TESTS PASSED'
