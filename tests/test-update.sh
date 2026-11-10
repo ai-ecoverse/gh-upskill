@@ -136,7 +136,7 @@ case "$mode" in
 esac
 UNZIP
 
-for cmd in uname bash cat chmod cp dirname basename find head tail awk sed mkdir mktemp rm rmdir grep wc tr mv ln cmp readlink date sort cut env ls; do
+for cmd in uname bash cat chmod cp dirname basename find head tail awk sed mkdir mktemp rm rmdir grep wc tr mv ln cmp readlink date sort cut env ls stat; do
   ln -s "$(command -v "$cmd")" "$TMP/bin/$cmd"
 done
 ln -s "$(command -v jq)" "$TMP/bin-jq/jq"
@@ -331,6 +331,42 @@ t_outdated_fixture() {
   if grep -q '^ *slack ' ahead.log; then fail "marker ahead of path commit reported outdated"; fi
 }
 
+mode_of() { stat -c %a "$1" 2>/dev/null || stat -f %Lp "$1"; }
+t_update_keeps_folder_modes() {
+  umask 022
+  run test/repo --skill slack --dest D
+  [[ "$(mode_of D/slack)" == 755 ]] || fail "installed folder is $(mode_of D/slack)"
+  set_head "$C3"
+  # sudo keeps the caller's umask, such as seven's 077: a root update of a
+  # global skill must leave it as readable as it was.
+  (umask 077 && run update slack --dest D)
+  is_v2 D/slack
+  [[ "$(mode_of D/slack)" == 755 ]] || fail "updated folder is $(mode_of D/slack), not 755"
+  [[ "$(mode_of D/slack/scripts)" == 755 ]] || fail "updated scripts/ is $(mode_of D/slack/scripts)"
+  [[ "$(mode_of D/slack/SKILL.md)" == 644 ]] || fail "updated SKILL.md is $(mode_of D/slack/SKILL.md)"
+  [[ "$(mode_of D/slack/scripts/slack-support)" == 755 ]] || fail "updated script is $(mode_of D/slack/scripts/slack-support)"
+  [[ "$(mode_of D/slack/.upskill)" == 644 ]] || fail "updated marker is $(mode_of D/slack/.upskill)"
+  chmod 750 D/slack
+  set_head "$C1"
+  run update slack --dest D --force
+  [[ "$(mode_of D/slack)" == 750 ]] || fail "an update changed the folder's mode 750 to $(mode_of D/slack)"
+  [[ "$(mode_of D/slack/SKILL.md)" == 640 ]] || fail "SKILL.md in a 750 folder is $(mode_of D/slack/SKILL.md)"
+}
+
+t_install_takes_destination_modes() {
+  umask 022
+  mkdir -p D
+  chmod 755 D
+  (umask 077 && run test/repo --skill slack --dest D)
+  [[ "$(mode_of D/slack)" == 755 ]] || fail "a skill installed into a 755 folder is $(mode_of D/slack)"
+  [[ "$(mode_of D/slack/references)" == 755 ]] || fail "references/ is $(mode_of D/slack/references)"
+  [[ "$(mode_of D/slack/SKILL.md)" == 644 ]] || fail "SKILL.md is $(mode_of D/slack/SKILL.md)"
+  mkdir -p P && chmod 700 P
+  run test/repo --skill slack --dest P
+  [[ "$(mode_of P/slack)" == 700 ]] || fail "a skill installed into a 700 folder is $(mode_of P/slack)"
+  [[ "$(mode_of P/slack/SKILL.md)" == 600 ]] || fail "its SKILL.md is $(mode_of P/slack/SKILL.md)"
+}
+
 t_update_errors() {
   if run update --dest D 2>/dev/null; then fail "update without names or --all should fail"; fi
   mkdir -p D/plain && skill_md plain p p > D/plain/SKILL.md
@@ -364,6 +400,8 @@ check "no marker: skip, or replace with --force" t_no_marker_keeps_old_behaviour
 check "reads a SLICC 6 marker (compact)" t_slicc6_marker_compact
 check "reads a SLICC 6 marker (pretty-printed)" t_slicc6_marker_pretty
 check "outdated against a fixture" t_outdated_fixture
+check "update keeps the skill folder's modes" t_update_keeps_folder_modes
+check "install takes the destination's modes" t_install_takes_destination_modes
 check "update argument errors" t_update_errors
 check "ClawHub marker and outdated" t_clawhub_marker
 

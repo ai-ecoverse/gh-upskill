@@ -499,6 +499,39 @@ prune_empty_parents() {
   done
 }
 
+folder_mask() {
+  # $1: dir. The group and other permission bits it withholds, as a umask
+  # (755 gives 022, 750 gives 027). Fails when the mode can't be read.
+  local mode
+  mode=$(stat -c %a "$1" 2>/dev/null) || mode=$(stat -f %Lp "$1" 2>/dev/null) || return 1
+  [[ "$mode" =~ ^[0-7]{3,4}$ ]] || return 1
+  printf '%03o' $(( ~8#$mode & 8#077 ))
+}
+
+apply_skill_modes() {
+  # $1: skill dir, $2: mask (see folder_mask), $3: file listing what was
+  # installed. Gives the skill dir, the directories that lead to those files,
+  # the files and the marker the modes the mask allows: a skill is as
+  # readable as the folder it goes into (an install) or as it was (an
+  # update), whatever the umask, such as the 077 sudo keeps from a user.
+  local dir="$1" mask=$((8#$2)) rel sub
+  local dmode fmode xmode
+  dmode=$(printf '%o' $((8#777 & ~mask)))
+  fmode=$(printf '%o' $((8#666 & ~mask)))
+  xmode=$(printf '%o' $((8#777 & ~mask)))
+  chmod "$dmode" "$dir"
+  while IFS= read -r rel; do
+    sub="$rel"
+    while [[ "$sub" == */* ]]; do
+      sub="${sub%/*}"
+      [[ -d "$dir/$sub" && ! -L "$dir/$sub" ]] && chmod "$dmode" "$dir/$sub"
+    done
+    [[ -f "$dir/$rel" && ! -L "$dir/$rel" ]] || continue
+    if [[ -x "$dir/$rel" ]]; then chmod "$xmode" "$dir/$rel"; else chmod "$fmode" "$dir/$rel"; fi
+  done <"$3"
+  [[ ! -f "$dir/$MARKER_FILE" ]] || chmod "$fmode" "$dir/$MARKER_FILE"
+}
+
 place_skill() {
   # Install or update one skill folder from a source directory.
   # $1: source dir, $2: target dir, $3: force, $4: log prefix, $5: skill name
@@ -506,15 +539,18 @@ place_skill() {
   # files, deletes files the old marker lists that upstream dropped, keeps
   # everything else and every existing dotfile. Without one, the target is
   # skipped, or replaced with --force.
-  # Sets _UPS_PLACED_FILES (file listing what was installed) and
-  # _UPS_PLACE_MODE (installed|updated). Returns 1 when skipped.
+  # Sets _UPS_PLACED_FILES (file listing what was installed),
+  # _UPS_PLACE_MODE (installed|updated) and _UPS_PLACE_MASK (the mask for
+  # apply_skill_modes, empty when unknown). Returns 1 when skipped.
   local src="$1" target="$2" force="$3" prefix="$4" name="$5" rel new_list
   new_list=$(mktemp "$_UPS_TMPDIR/files.XXXXXX")
   list_tree_files "$src" >"$new_list"
   _UPS_PLACE_MODE=installed
+  _UPS_PLACE_MASK=""
   if [[ -d "$target" ]]; then
     if marker_valid "$target/$MARKER_FILE"; then
       _UPS_PLACE_MODE=updated
+      _UPS_PLACE_MASK=$(folder_mask "$target") || _UPS_PLACE_MASK=""
       log "${prefix}Updating skill in place: $name"
       # Stage a copy so existing dotfiles (credentials, state) can be left out.
       local stage
@@ -546,8 +582,16 @@ place_skill() {
     fi
   fi
   mkdir -p "$target"
+  if [[ "$_UPS_PLACE_MODE" == installed ]]; then
+    _UPS_PLACE_MASK=$(folder_mask "$(dirname "$target")") || _UPS_PLACE_MASK=""
+  fi
   copy_tree "$src" "$target" || die "Could not copy skill: $name"
   _UPS_PLACED_FILES="$new_list"
+}
+
+finish_skill() {
+  # $1: skill dir. Applies the modes place_skill chose, after the marker.
+  [[ -z "${_UPS_PLACE_MASK:-}" ]] || apply_skill_modes "$1" "$_UPS_PLACE_MASK" "$_UPS_PLACED_FILES"
 }
 
 discover_skill_files() {
@@ -656,6 +700,7 @@ copy_skill() {
   local rel_path="${skill_dir#"$_UPS_SRC_ROOT"}"
   rel_path="${rel_path#/}"
   write_marker "$target" github "$_UPS_SRC_REPO" "$skill_name" "${_UPS_SRC_REF:-}" "$rel_path" "${_UPS_SRC_SHA:-}" "" "$_UPS_PLACED_FILES"
+  finish_skill "$target"
 
   if [[ "$_UPS_PLACE_MODE" == updated ]]; then
     log "${prefix}Updated skill: $skill_name${_UPS_SRC_SHA:+ (${_UPS_SRC_SHA:0:7})}"
@@ -1189,6 +1234,7 @@ install_from_clawhub() {
   mkdir -p "$dest_dir"
   place_skill "$src_dir" "$target" "$force" "" "$slug" || return 0
   write_marker "$target" clawhub "${owner:+$owner/}$slug" "$slug" "" "" "" "$release" "$_UPS_PLACED_FILES"
+  finish_skill "$target"
 
   if [[ "$_UPS_PLACE_MODE" == updated ]]; then
     log "Updated skill from ClawHub: $slug${release:+ ($release)} → $target"

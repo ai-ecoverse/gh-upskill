@@ -6,6 +6,9 @@ on:
   pull_request:
     branches: [ main ]
 
+permissions:
+  contents: read
+
 # Supersede stale runs: a newer push to the same PR or renovate branch cancels
 # the older run; other refs keep at most one pending run.
 concurrency:
@@ -41,3 +44,36 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: bash tests/test-kernel.sh
+
+      - name: The npm package with pnpm add -g and as a tools root in the SLICC kernel
+        run: bash tests/test-package-kernel.sh
+
+  release:
+    needs: [build, kernel]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    concurrency:
+      group: release-${{ github.ref_name }}
+      cancel-in-progress: false
+    permissions:
+      contents: write
+      issues: write
+      pull-requests: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 26
+          cache: npm
+
+      - run: npm ci --ignore-scripts
+
+      - name: semantic-release
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: npx semantic-release
