@@ -17,9 +17,13 @@ Install [Agent Skills](https://agentskills.io) from GitHub repositories.
   - macOS/Linux: `curl -fsSL https://raw.githubusercontent.com/ai-ecoverse/gh-upskill/main/install.sh | bash`
   - Custom prefix: `curl -fsSL https://raw.githubusercontent.com/ai-ecoverse/gh-upskill/main/install.sh | bash -s -- --prefix ~/.local`
 
+- npm: `npm install -g @ai-ecoverse/gh-upskill` (or `pnpm add -g @ai-ecoverse/gh-upskill`) installs `upskill` and `gh-upskill`
+
 - GitHub CLI extension
   - `gh extension install ai-ecoverse/gh-upskill`
   - Then run via `gh upskill ...` (or use `upskill` directly)
+
+- seven (SLICC): preinstalled in `/usr/bin`, see [seven / SLICC kernel](#seven--slicc-kernel)
 
 ## Usage
 
@@ -199,14 +203,31 @@ Authentication uses `GITHUB_TOKEN`, then `GH_TOKEN`, then `gh auth token` if ava
 
 ### seven / SLICC kernel
 
-Install directly in seven's shell:
+Seven ships `upskill` and `gh-upskill` preinstalled, from the npm package [`@ai-ecoverse/gh-upskill`](https://www.npmjs.com/package/@ai-ecoverse/gh-upskill): root-owned commands in `/usr/bin`, kept at npm's latest release by seven's own tool updates. Nothing needs installing:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/ai-ecoverse/gh-upskill/main/install.sh | bash
+upskill --version
 upskill adobe/helix-website --skill "Searching AEM Documentation"
 ```
 
-Seven is detected when `uname -s` reports `Emscripten`, or when `SLICC_PAGE_LOOPBACK` is set. The installer defaults to `$PNPM_HOME/bin`; if `PNPM_HOME` is absent it uses `~/.local/share/pnpm/bin` and checks that directory is on PATH. Explicit `--prefix` and `--bin-dir` keep their usual meaning. No npm package is needed.
+Seven's global skills in `/usr/share/skills` belong to root. Anyone can check them; updating one needs `sudo`, which runs the root-owned `/usr/bin/upskill`:
+
+```bash
+upskill outdated --dest /usr/share/skills
+sudo upskill update slack --dest /usr/share/skills
+```
+
+An update keeps a skill's dotfiles and state files, such as slack's `.last-post-*.json` and `emoji-cache.json` (see [Updating skills](#updating-skills)).
+
+The package gives the SLICC kernel `upskill` and `gh-upskill` as `slicc.commands`: a small JS command (`kernel/upskill.mjs`) that runs the package's own `upskill` with the kernel's bash. Its `bin` entries are the bash scripts themselves, for npm and pnpm on other hosts. In the kernel, a pnpm bin shim of a script command doesn't run (slicc has no `node`, and the kernel runs a pnpm shim only for a non-script command of its package), so the JS command is what lets `pnpm add -g @ai-ecoverse/gh-upskill` work in seven too, from `$PNPM_HOME/bin`. Seven itself doesn't need that: it installs the package in its tools root.
+
+`install.sh` is for other hosts. In seven, when `/usr/bin/upskill` exists, it installs nothing and says so, so a user's copy in `$PNPM_HOME/bin` never shadows the preinstalled one (that copy is the user's own, and `sudo` refuses a user-owned command). In an older seven without the preinstalled command, it installs into `$PNPM_HOME/bin` as before:
+
+```bash
+command -v upskill || curl -fsSL https://raw.githubusercontent.com/ai-ecoverse/gh-upskill/main/install.sh | bash
+```
+
+Seven is detected when `uname -s` reports `Emscripten`, or when `SLICC_PAGE_LOOPBACK` is set. The installer then defaults to `$PNPM_HOME/bin`; if `PNPM_HOME` is absent it uses `~/.local/share/pnpm/bin` and checks that directory is on PATH. Explicit `--prefix` and `--bin-dir` keep their usual meaning, and install a copy even when seven ships one.
 
 In this environment upskill defaults to `~/.pi/agent/skills/<name>/SKILL.md`, including with `-g`. `--dest` or `--dest-path` overrides that default. `list`, `info` and `read` include pi's user skills and `.pi/skills`; pi loads project skills only in trusted folders. The destination also works explicitly outside seven:
 
@@ -215,13 +236,6 @@ upskill adobe/helix-website --skill "Searching AEM Documentation" --dest "$HOME/
 ```
 
 Without slicc-node, seven reaches the web through the page's fetch, so `raw.githubusercontent.com` and `api.github.com` must answer with CORS headers; both provide them. Other sources may need the local proxy. Set `GITHUB_TOKEN` or `GH_TOKEN` in the shell for private repositories and to avoid GitHub's [60 requests per hour unauthenticated limit](https://docs.github.com/en/rest/using-the-rest-api/rate-limits-for-the-rest-api), shared by originating IP address.
-
-The follow-up gelatiere integration can bootstrap the same installer:
-
-```bash
-command -v upskill || curl -fsSL https://raw.githubusercontent.com/ai-ecoverse/gh-upskill/main/install.sh | bash
-upskill adobe/helix-website --skill "Searching AEM Documentation"
-```
 
 ### Claude Code auto-detection
 
@@ -237,7 +251,13 @@ Using `--dest-path` disables this auto-detection — skills are only installed t
 - Lint: `make lint` (shellcheck)
 - Test: `make test` (portable fixtures, offline marker/update fixtures in `tests/test-update.sh`, plus network integration tests). `UPSKILL=/path/to/upskill bash tests/test-update.sh` runs the update tests against another build.
 - Kernel: `bash tests/test-kernel.sh` (Node 24+, npm and network required). Runs actual WASM bash, coreutils, curl, jq, sed, gawk, grep and findutils through the Node kernel entry, with no Chrome harness. It serves the checkout's installer/scripts through the test transport so PR changes are exercised, then installs a public skill from the real GitHub API. It also installs `ai-ecoverse/skills`' slack skill at `1fd7a31` into `/usr/share/skills` with a SLICC 6-style marker and state files, then checks `outdated` and `update`. CI supplies `GH_TOKEN` for API limits; a local shell can supply either token variable.
-- CI runs lint, shell tests and the kernel test on pushes/PRs to `main`.
+- Package: `bash tests/test-package.sh` (part of `make test`; Node and npm). Packs the npm package and checks what it ships, that both bins are executable bash scripts, that `prepack` writes the package's version into `upskill` (`scripts/stamp-version.sh`; a checkout's `0.0.0` stays unstamped), and that `npm install -g` runs both.
+- Package in the kernel: `bash tests/test-package-kernel.sh` (Node 24+, npm and network required). Installs the packed package with seven's `wasi-pnpm` (`pnpm add -g`) in slicc-kernel and runs `upskill` and `gh-upskill` from `$PNPM_HOME/bin` and `/usr/bin`, then from a tools root as seven installs it (root-owned `/usr/bin/upskill`), and checks that `install.sh` leaves a preinstalled `upskill` alone.
+- CI runs lint, shell tests and the kernel tests on pushes/PRs to `main`.
+
+### Releases
+
+Every push to `main` that passes CI runs [semantic-release](https://github.com/semantic-release/semantic-release) (`.releaserc.json`): `feat:` and `fix:` commits publish `@ai-ecoverse/gh-upskill` to npm with provenance, through npm's trusted publishing from `ci.yml` (no npm token; the `fledgling` block in `package.json` describes the trusted publisher, `npm run trust` sets it up), tag `v<version>` and write the GitHub release. Nothing is published by hand. `install.sh` and `gh extension install` keep reading the repository's `main`.
 
 The Node entry uses an in-memory filesystem and a transport without browser CORS constraints. For the final check in seven's actual OPFS/browser environment, run:
 

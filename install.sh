@@ -32,6 +32,10 @@ while [[ $# -gt 0 ]]; do
 done
 
 if [[ -z "$PREFIX" && -z "$BIN_DIR" ]] && { [[ -n "${SLICC_PAGE_LOOPBACK:-}" ]] || [[ "$(uname -s 2>/dev/null)" == Emscripten ]]; }; then
+  if [[ -x /usr/bin/upskill ]]; then
+    echo "seven ships upskill in /usr/bin; nothing to install. Use --bin-dir to install a copy anyway."
+    exit 0
+  fi
   BIN_DIR="${PNPM_HOME:-$HOME/.local/share/pnpm}/bin"
   case ":$PATH:" in
     *":$BIN_DIR:"*) ;;

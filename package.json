@@ -1,0 +1,63 @@
+{
+  "name": "@ai-ecoverse/gh-upskill",
+  "version": "0.0.0",
+  "description": "Install and update Agent Skills from GitHub, ClawHub or Tessl: upskill, also as the gh upskill extension",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ai-ecoverse/gh-upskill.git"
+  },
+  "homepage": "https://github.com/ai-ecoverse/gh-upskill",
+  "bugs": {
+    "url": "https://github.com/ai-ecoverse/gh-upskill/issues"
+  },
+  "keywords": [
+    "agent-skills",
+    "skills",
+    "gh-extension",
+    "slicc"
+  ],
+  "bin": {
+    "upskill": "upskill",
+    "gh-upskill": "gh-upskill"
+  },
+  "slicc": {
+    "commands": {
+      "upskill": {
+        "abi": "js",
+        "module": "kernel/upskill.mjs"
+      },
+      "gh-upskill": {
+        "abi": "js",
+        "module": "kernel/upskill.mjs"
+      }
+    }
+  },
+  "files": [
+    "LICENSE",
+    "README.md",
+    "upskill",
+    "gh-upskill",
+    "kernel/upskill.mjs"
+  ],
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
+  "fledgling": {
+    "provider": "github",
+    "workflow": "ci.yml",
+    "repo": "ai-ecoverse/gh-upskill",
+    "publish": true
+  },
+  "scripts": {
+    "prepack": "bash scripts/stamp-version.sh",
+    "test": "make ci",
+    "release": "semantic-release",
+    "trust": "npx fledgling sync -y --skip-publish",
+    "trust:dry": "npx fledgling sync --dry-run -y --skip-publish"
+  },
+  "devDependencies": {
+    "semantic-release": "25.0.9"
+  }
+}
