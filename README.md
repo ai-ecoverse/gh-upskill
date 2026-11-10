@@ -258,7 +258,7 @@ Using `--dest-path` disables this auto-detection — skills are only installed t
 
 ### Releases
 
-Every push to `main` that passes CI runs [semantic-release](https://github.com/semantic-release/semantic-release) (`.releaserc.json`): `feat:` and `fix:` commits publish `@ai-ecoverse/gh-upskill` to npm with provenance, through npm's trusted publishing from `ci.yml` (no npm token; the `fledgling` block in `package.json` describes the trusted publisher, `npm run trust` sets it up), tag `v<version>` and write the GitHub release. Nothing is published by hand. `install.sh` and `gh extension install` keep reading the repository's `main`.
+Every push to `main` that passes CI runs [semantic-release](https://github.com/semantic-release/semantic-release) (`.releaserc.json`): `feat:` and `fix:` commits publish `@ai-ecoverse/gh-upskill` to npm with provenance, through npm's trusted publishing from `ci.yml` (no npm token; the `fledgling` block in `package.json` describes the trusted publisher, `npm run trust` sets it up), tag `v<version>` and write the GitHub release. The vibe-coded badge workflow pushes a README-only commit to `main` after each merge, which starts no CI of its own, so the release job fast-forwards to it first; semantic-release refuses to release from a checkout behind `main`. Nothing is published by hand. `install.sh` and `gh extension install` keep reading the repository's `main`.
 
 The Node entry uses an in-memory filesystem and a transport without browser CORS constraints. For the final check in seven's actual OPFS/browser environment, run:
 

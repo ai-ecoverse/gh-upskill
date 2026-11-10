@@ -73,6 +73,16 @@ jobs:
 
       - run: npm ci --ignore-scripts
 
+      - name: Catch up with the badge commit
+        run: |
+          git fetch --quiet origin main
+          changed=$(git diff --name-only "$GITHUB_SHA" origin/main)
+          if [ -z "$changed" ] || [ "$changed" = README.md ]; then
+            git merge --ff-only --quiet origin/main
+          else
+            echo "main moved on with more than README.md ($changed); its own run releases it"
+          fi
+
       - name: semantic-release
         env:
           GITHUB_TOKEN: ${{ github.token }}
