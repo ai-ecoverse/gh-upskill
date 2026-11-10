@@ -101,6 +101,7 @@ When you reinstall over a folder that has a marker, or run `upskill update`, the
 - Files the old marker lists that upstream no longer has are removed.
 - Nothing else is touched. That includes files a skill keeps as state in its own folder (for example slack's `.last-post-*.json`, `.watch-*.json` and `emoji-cache.json`) and your own notes.
 - Dotfiles that already exist are never overwritten or removed, because they often hold credentials (for example `scripts/.config`). Upstream dotfiles are still written when they are missing.
+- The skill keeps its folder's permissions: the folder, the folders leading to upskill's files, those files (executable or not) and the marker get the group and other bits the folder had, whatever the umask. An install takes them from the destination folder instead. So `sudo upskill update` of a skill in `/usr/share/skills` (mode 755) leaves it readable for everyone, though `sudo` keeps a umask such as 077 from the user.
 
 A folder without a marker keeps the old behaviour. It is skipped, or deleted and reinstalled with `--force`. To start tracking a skill like that, reinstall it once with `--force`.
 
@@ -113,7 +114,7 @@ $ upskill outdated --dest /usr/share/skills
 
 1 of 1 tracked skill(s) can be updated: upskill update --all --dest /usr/share/skills
 
-$ upskill update slack --dest /usr/share/skills
+$ sudo upskill update slack --dest /usr/share/skills
 Updating slack from ai-ecoverse/skills (skills/slack), installed 1fd7a31
 Updating skill in place: slack
   removed scripts/slack-support.jsh (dropped upstream)
