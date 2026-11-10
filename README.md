@@ -2,7 +2,7 @@
 
 # upskill
 
-[![54% Vibe_Coded](https://img.shields.io/badge/54%25-Vibe_Coded-ff69b4?style=for-the-badge&logo=robot&logoColor=white)](https://github.com/ai-ecoverse/vibe-coded-badge-action)
+[![81% Vibe_Coded](https://img.shields.io/badge/81%25-Vibe_Coded-ff69b4?style=for-the-badge&logo=robot&logoColor=white)](https://github.com/ai-ecoverse/vibe-coded-badge-action)
 
 Install [Agent Skills](https://agentskills.io) from GitHub repositories.
 
